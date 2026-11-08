@@ -26,7 +26,7 @@ public class ReceiptItem extends BaseEntity {
     @Column(name = "rejected_qty", nullable = false)
     private int rejectedQty = 0;
 
-    @Column(name = "unit_cost")
+    @Column(name = "unit_cost", nullable = false)
     private Long unitCost = 0L;
 
     public Long getId() {

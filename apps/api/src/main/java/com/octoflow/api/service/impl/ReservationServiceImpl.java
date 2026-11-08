@@ -12,10 +12,13 @@ import com.octoflow.api.mapper.ReservationMapper;
 import com.octoflow.api.repository.InventoryBalanceRepository;
 import com.octoflow.api.repository.ProductVariantRepository;
 import com.octoflow.api.repository.ReservationRepository;
-import com.octoflow.api.service.ReservationService;
 import com.octoflow.api.service.IdempotencyService;
 import com.octoflow.api.service.InventoryMovementRecorder;
+import com.octoflow.api.service.ReservationService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
@@ -26,25 +29,32 @@ import java.util.Map;
 @Service
 public class ReservationServiceImpl implements ReservationService {
 
+    private static final Logger log = LoggerFactory.getLogger(ReservationServiceImpl.class);
+    private static final int DEFAULT_TTL_MINUTES = 15;
+    private static final int MAX_TTL_MINUTES = 1440;
+
     private final ReservationRepository reservationRepository;
     private final InventoryBalanceRepository balanceRepository;
     private final ProductVariantRepository variantRepository;
     private final ReservationMapper reservationMapper;
     private final IdempotencyService idempotencyService;
     private final InventoryMovementRecorder movementRecorder;
+    private final ReservationExpiryProcessor expiryProcessor;
 
     public ReservationServiceImpl(ReservationRepository reservationRepository,
                                   InventoryBalanceRepository balanceRepository,
                                   ProductVariantRepository variantRepository,
                                   ReservationMapper reservationMapper,
                                   IdempotencyService idempotencyService,
-                                  InventoryMovementRecorder movementRecorder) {
+                                  InventoryMovementRecorder movementRecorder,
+                                  ReservationExpiryProcessor expiryProcessor) {
         this.reservationRepository = reservationRepository;
         this.balanceRepository = balanceRepository;
         this.variantRepository = variantRepository;
         this.reservationMapper = reservationMapper;
         this.idempotencyService = idempotencyService;
         this.movementRecorder = movementRecorder;
+        this.expiryProcessor = expiryProcessor;
     }
 
     @Override
@@ -76,18 +86,30 @@ public class ReservationServiceImpl implements ReservationService {
     }
 
     private ReservationResponse reserveInternal(ReserveStockRequest request, String idempotencyKey) {
-        ProductVariant variant = variantRepository.findBySku(request.sku())
-                .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.SKU_NOT_FOUND, "Không tìm thấy SKU " + request.sku()));
+        if (request == null || request.sku() == null || request.sku().isBlank()) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "SKU không được để trống.");
+        }
+        if (request.quantity() == null || request.quantity() <= 0) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "Số lượng giữ phải lớn hơn 0.");
+        }
+        int ttl = request.ttlMinutes() == null ? DEFAULT_TTL_MINUTES : request.ttlMinutes();
+        if (ttl < 1 || ttl > MAX_TTL_MINUTES) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                    "Thời hạn giữ phải từ 1 đến " + MAX_TTL_MINUTES + " phút.");
+        }
+
+        String sku = request.sku().trim();
+        ProductVariant variant = variantRepository.findBySku(sku)
+                .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.SKU_NOT_FOUND, "Không tìm thấy SKU " + sku));
 
         InventoryBalance balance = balanceRepository.findByVariantIdWithLock(variant.getId())
-                .orElseThrow(() -> new BusinessRuleException(ErrorCode.INSUFFICIENT_STOCK, "Chưa có số dư tồn kho cho SKU " + request.sku()));
+                .orElseThrow(() -> new BusinessRuleException(ErrorCode.INSUFFICIENT_STOCK, "Chưa có số dư tồn kho cho SKU " + sku));
 
-        if (balance.getAvailableToSell() < request.quantity()) {
+        if (availableToSell(balance, sku) < request.quantity()) {
             throw new BusinessRuleException(ErrorCode.INSUFFICIENT_STOCK, "Số lượng có thể bán không đủ để giữ hàng");
         }
 
         InventoryMovementRecorder.Snapshot before = InventoryMovementRecorder.Snapshot.from(balance);
-        // Increase reserved count
         try {
             balance.setReserved(Math.addExact(balance.getReserved(), request.quantity()));
         } catch (ArithmeticException ex) {
@@ -95,13 +117,13 @@ public class ReservationServiceImpl implements ReservationService {
         }
         balanceRepository.save(balance);
 
-        int ttl = request.ttlMinutes() != null && request.ttlMinutes() > 0 ? request.ttlMinutes() : 15;
+        Instant now = reservationRepository.databaseNow().toInstant();
         Reservation hold = new Reservation();
         hold.setVariantId(variant.getId());
         hold.setOrderId(request.orderId());
         hold.setQuantity(request.quantity());
         hold.setStatus(Reservation.Status.ACTIVE);
-        hold.setExpiresAt(Instant.now().plus(ttl, ChronoUnit.MINUTES));
+        hold.setExpiresAt(now.plus(ttl, ChronoUnit.MINUTES));
 
         Reservation saved = reservationRepository.save(hold);
         movementRecorder.record(variant.getId(), before, balance, "RESERVATION_CREATED",
@@ -131,7 +153,7 @@ public class ReservationServiceImpl implements ReservationService {
         if (hold.getStatus() != Reservation.Status.ACTIVE) {
             throw new BusinessRuleException(ErrorCode.RESERVATION_ALREADY_CONFIRMED, "Mã giữ hàng không còn hiệu lực");
         }
-        if (hold.isExpired()) {
+        if (!hold.getExpiresAt().isAfter(reservationRepository.databaseNow().toInstant())) {
             throw new BusinessRuleException(ErrorCode.RESERVATION_EXPIRED, "Mã giữ hàng đã hết hạn");
         }
 
@@ -161,6 +183,8 @@ public class ReservationServiceImpl implements ReservationService {
             return;
         }
 
+        // A release that reaches an already-overdue hold is an expiry, not a cancellation.
+        boolean expired = !hold.getExpiresAt().isAfter(reservationRepository.databaseNow().toInstant());
         if (balance.getReserved() < hold.getQuantity()) {
             throw new BusinessRuleException(ErrorCode.INVALID_STOCK_BALANCE,
                     "Số lượng giữ trong reservation không khớp với số dư tồn kho.");
@@ -169,36 +193,54 @@ public class ReservationServiceImpl implements ReservationService {
         balance.setReserved(balance.getReserved() - hold.getQuantity());
         balanceRepository.save(balance);
 
-        hold.setStatus(Reservation.Status.CANCELLED);
+        hold.setStatus(expired ? Reservation.Status.EXPIRED : Reservation.Status.CANCELLED);
         reservationRepository.save(hold);
-        movementRecorder.record(hold.getVariantId(), before, balance, "RESERVATION_RELEASED",
-                "Release reservation " + reservationId, reservationId.toString());
+        movementRecorder.record(hold.getVariantId(), before, balance,
+                expired ? "RESERVATION_EXPIRED" : "RESERVATION_RELEASED",
+                (expired ? "Expire reservation " : "Release reservation ") + reservationId,
+                reservationId.toString());
     }
 
     @Override
-    @Transactional
-    public void expireHolds() {
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public ExpirySweepResult expireHolds() {
         Instant now = Instant.now();
         List<ReservationRepository.ExpiredReservationCandidate> candidates = reservationRepository.findExpiredCandidates(now);
+        int expired = 0;
+        int skipped = 0;
+        int failed = 0;
+
         for (ReservationRepository.ExpiredReservationCandidate candidate : candidates) {
-            InventoryBalance balance = balanceRepository.findByVariantIdWithLock(candidate.getVariantId())
-                    .orElseThrow(() -> new IllegalStateException("Reservation has no inventory balance: " + candidate.getId()));
-            Reservation hold = reservationRepository.findByIdForUpdate(candidate.getId())
-                    .orElseThrow(() -> new IllegalStateException("Reservation disappeared during expiry sweep: " + candidate.getId()));
-            if (hold.getStatus() != Reservation.Status.ACTIVE || hold.getExpiresAt().isAfter(now)) {
-                continue;
+            try {
+                if (expiryProcessor.expireOne(candidate.getId())) {
+                    expired++;
+                } else {
+                    skipped++;
+                }
+            } catch (Exception ex) {
+                failed++;
+                // Each candidate owns a separate transaction, so valid expirations before and
+                // after this one are already durable. Log enough identity to retry the bad row.
+                log.error("Reservation expiry failed for reservationId={} variantId={}: {}",
+                        candidate.getId(), candidate.getVariantId(), ex.getMessage(), ex);
             }
-            if (balance.getReserved() < hold.getQuantity()) {
-                throw new BusinessRuleException(ErrorCode.INVALID_STOCK_BALANCE,
-                        "Số lượng giữ hết hạn không khớp với số dư tồn kho.");
-            }
-            InventoryMovementRecorder.Snapshot before = InventoryMovementRecorder.Snapshot.from(balance);
-            balance.setReserved(balance.getReserved() - hold.getQuantity());
-            balanceRepository.save(balance);
-            hold.setStatus(Reservation.Status.EXPIRED);
-            reservationRepository.save(hold);
-            movementRecorder.record(hold.getVariantId(), before, balance, "RESERVATION_EXPIRED",
-                    "Expire reservation " + hold.getId(), hold.getId().toString());
+        }
+
+        if (failed > 0) {
+            log.warn("Reservation expiry sweep completed with failures: expired={} skipped={} failed={}",
+                    expired, skipped, failed);
+        } else if (expired > 0) {
+            log.info("Reservation expiry sweep completed: expired={} skipped={}", expired, skipped);
+        }
+        return new ExpirySweepResult(expired, skipped, failed);
+    }
+
+    private int availableToSell(InventoryBalance balance, String sku) {
+        try {
+            return balance.getAvailableToSell();
+        } catch (IllegalStateException ex) {
+            throw new BusinessRuleException(ErrorCode.INVALID_STOCK_BALANCE,
+                    "Số dư tồn kho của SKU " + sku + " đang không nhất quán.");
         }
     }
 
