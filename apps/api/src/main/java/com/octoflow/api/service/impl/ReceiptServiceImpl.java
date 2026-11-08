@@ -10,6 +10,7 @@ import com.octoflow.api.entity.ReceiptItem;
 import com.octoflow.api.exception.BusinessRuleException;
 import com.octoflow.api.exception.ErrorCode;
 import com.octoflow.api.exception.ResourceNotFoundException;
+import com.octoflow.api.mapper.ReceiptMapper;
 import com.octoflow.api.repository.InventoryBalanceRepository;
 import com.octoflow.api.repository.InventoryLedgerRepository;
 import com.octoflow.api.repository.ReceiptRepository;
@@ -29,21 +30,22 @@ public class ReceiptServiceImpl implements ReceiptService {
     private final ReceiptRepository receiptRepository;
     private final InventoryBalanceRepository balanceRepository;
     private final InventoryLedgerRepository ledgerRepository;
+    private final ReceiptMapper receiptMapper;
 
     public ReceiptServiceImpl(ReceiptRepository receiptRepository,
                               InventoryBalanceRepository balanceRepository,
-                              InventoryLedgerRepository ledgerRepository) {
+                              InventoryLedgerRepository ledgerRepository,
+                              ReceiptMapper receiptMapper) {
         this.receiptRepository = receiptRepository;
         this.balanceRepository = balanceRepository;
         this.ledgerRepository = ledgerRepository;
+        this.receiptMapper = receiptMapper;
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<ReceiptResponse> listReceipts() {
-        return receiptRepository.findAll().stream()
-                .map(this::mapToResponse)
-                .collect(Collectors.toList());
+        return receiptMapper.toResponses(receiptRepository.findAll());
     }
 
     @Override
@@ -51,7 +53,7 @@ public class ReceiptServiceImpl implements ReceiptService {
     public ReceiptResponse getReceiptById(Long id) {
         Receipt receipt = receiptRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Không tìm thấy phiếu nhập #" + id));
-        return mapToResponse(receipt);
+        return receiptMapper.toResponse(receipt);
     }
 
     @Override
@@ -76,7 +78,7 @@ public class ReceiptServiceImpl implements ReceiptService {
 
         receipt.setItems(items);
         Receipt saved = receiptRepository.save(receipt);
-        return mapToResponse(saved);
+        return receiptMapper.toResponse(saved);
     }
 
     @Override
@@ -131,29 +133,6 @@ public class ReceiptServiceImpl implements ReceiptService {
 
         receipt.setStatus(Receipt.Status.COMPLETED);
         Receipt saved = receiptRepository.save(receipt);
-        return mapToResponse(saved);
-    }
-
-    private ReceiptResponse mapToResponse(Receipt receipt) {
-        List<ReceiptResponse.ReceiptItemResponse> items = receipt.getItems().stream().map(it ->
-                new ReceiptResponse.ReceiptItemResponse(
-                        it.getId(),
-                        it.getVariantId(),
-                        it.getExpectedQty(),
-                        it.getAcceptedQty(),
-                        it.getRejectedQty(),
-                        it.getUnitCost()
-                )
-        ).collect(Collectors.toList());
-
-        return new ReceiptResponse(
-                receipt.getId(),
-                receipt.getReceiptNumber(),
-                receipt.getSupplierName(),
-                receipt.getStatus().name(),
-                items,
-                receipt.getCreatedAt(),
-                receipt.getUpdatedAt()
-        );
+        return receiptMapper.toResponse(saved);
     }
 }

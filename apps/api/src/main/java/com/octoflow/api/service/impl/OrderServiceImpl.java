@@ -10,6 +10,7 @@ import com.octoflow.api.entity.ProductVariant;
 import com.octoflow.api.exception.BusinessRuleException;
 import com.octoflow.api.exception.ErrorCode;
 import com.octoflow.api.exception.ResourceNotFoundException;
+import com.octoflow.api.mapper.OrderMapper;
 import com.octoflow.api.repository.InventoryBalanceRepository;
 import com.octoflow.api.repository.OrderRepository;
 import com.octoflow.api.repository.OutboxEventRepository;
@@ -21,7 +22,6 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 @Service
 public class OrderServiceImpl implements OrderService {
@@ -30,23 +30,24 @@ public class OrderServiceImpl implements OrderService {
     private final ProductVariantRepository variantRepository;
     private final InventoryBalanceRepository balanceRepository;
     private final OutboxEventRepository outboxEventRepository;
+    private final OrderMapper orderMapper;
 
     public OrderServiceImpl(OrderRepository orderRepository,
                             ProductVariantRepository variantRepository,
                             InventoryBalanceRepository balanceRepository,
-                            OutboxEventRepository outboxEventRepository) {
+                            OutboxEventRepository outboxEventRepository,
+                            OrderMapper orderMapper) {
         this.orderRepository = orderRepository;
         this.variantRepository = variantRepository;
         this.balanceRepository = balanceRepository;
         this.outboxEventRepository = outboxEventRepository;
+        this.orderMapper = orderMapper;
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<OrderResponse> listOrders() {
-        return orderRepository.findAll().stream()
-                .map(this::mapToResponse)
-                .collect(Collectors.toList());
+        return orderMapper.toResponseList(orderRepository.findAll());
     }
 
     @Override
@@ -54,7 +55,7 @@ public class OrderServiceImpl implements OrderService {
     public OrderResponse getOrderById(Long id) {
         Order order = orderRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.ORDER_NOT_FOUND, "Không tìm thấy đơn hàng #" + id));
-        return mapToResponse(order);
+        return orderMapper.toResponse(order);
     }
 
     @Override
@@ -91,7 +92,7 @@ public class OrderServiceImpl implements OrderService {
                 throw new BusinessRuleException(ErrorCode.INSUFFICIENT_STOCK, "SKU " + itemReq.sku() + " không đủ hàng để bán (ATS: " + balance.getAvailableToSell() + ")");
             }
 
-            // Immediately reserve or deduct stock according to source
+            // Immediately reserve stock for order
             balance.setReserved(balance.getReserved() + itemReq.quantity());
             balanceRepository.save(balance);
 
@@ -120,7 +121,7 @@ public class OrderServiceImpl implements OrderService {
         event.setPayload(String.format("{\"order_id\":%d,\"order_number\":\"%s\",\"total\":%d}", saved.getId(), saved.getOrderNumber(), saved.getTotalAmount()));
         outboxEventRepository.save(event);
 
-        return mapToResponse(saved);
+        return orderMapper.toResponse(saved);
     }
 
     @Override
@@ -130,7 +131,7 @@ public class OrderServiceImpl implements OrderService {
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.ORDER_NOT_FOUND, "Không tìm thấy đơn hàng #" + orderId));
 
         if (order.getPaymentStatus() == Order.PaymentStatus.PAID) {
-            return mapToResponse(order);
+            return orderMapper.toResponse(order);
         }
 
         order.setPaymentStatus(Order.PaymentStatus.PAID);
@@ -146,7 +147,7 @@ public class OrderServiceImpl implements OrderService {
         }
 
         Order saved = orderRepository.save(order);
-        return mapToResponse(saved);
+        return orderMapper.toResponse(saved);
     }
 
     @Override
@@ -157,32 +158,6 @@ public class OrderServiceImpl implements OrderService {
 
         order.setStatus(Order.Status.SHIPPED);
         Order saved = orderRepository.save(order);
-        return mapToResponse(saved);
-    }
-
-    private OrderResponse mapToResponse(Order order) {
-        List<OrderResponse.OrderItemResponse> itemResponses = order.getItems().stream().map(it ->
-                new OrderResponse.OrderItemResponse(
-                        it.getId(),
-                        it.getVariantId(),
-                        it.getSku(),
-                        it.getQuantity(),
-                        it.getUnitPrice()
-                )
-        ).collect(Collectors.toList());
-
-        return new OrderResponse(
-                order.getId(),
-                order.getOrderNumber(),
-                order.getSource().name(),
-                order.getStatus().name(),
-                order.getPaymentStatus().name(),
-                order.getTotalAmount(),
-                order.getCurrency(),
-                order.getExternalOrderId(),
-                itemResponses,
-                order.getCreatedAt(),
-                order.getUpdatedAt()
-        );
+        return orderMapper.toResponse(saved);
     }
 }

@@ -6,6 +6,7 @@ import com.octoflow.api.entity.Channel;
 import com.octoflow.api.entity.ChannelListing;
 import com.octoflow.api.exception.ErrorCode;
 import com.octoflow.api.exception.ResourceNotFoundException;
+import com.octoflow.api.mapper.ChannelMapper;
 import com.octoflow.api.repository.ChannelListingRepository;
 import com.octoflow.api.repository.ChannelRepository;
 import com.octoflow.api.service.ChannelService;
@@ -13,26 +14,26 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
-import java.util.stream.Collectors;
 
 @Service
 public class ChannelServiceImpl implements ChannelService {
 
     private final ChannelRepository channelRepository;
     private final ChannelListingRepository channelListingRepository;
+    private final ChannelMapper channelMapper;
 
     public ChannelServiceImpl(ChannelRepository channelRepository,
-                              ChannelListingRepository channelListingRepository) {
+                              ChannelListingRepository channelListingRepository,
+                              ChannelMapper channelMapper) {
         this.channelRepository = channelRepository;
         this.channelListingRepository = channelListingRepository;
+        this.channelMapper = channelMapper;
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<ChannelResponse> listChannels() {
-        return channelRepository.findAll().stream()
-                .map(this::mapToChannelResponse)
-                .collect(Collectors.toList());
+        return channelMapper.toChannelResponses(channelRepository.findAll());
     }
 
     @Override
@@ -40,15 +41,14 @@ public class ChannelServiceImpl implements ChannelService {
     public ChannelResponse getChannelById(Long channelId) {
         Channel channel = channelRepository.findById(channelId)
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.CHANNEL_NOT_FOUND, "Không tìm thấy kênh #" + channelId));
-        return mapToChannelResponse(channel);
+        return channelMapper.toChannelResponse(channel);
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<ChannelListingResponse> getChannelListings(Long channelId) {
-        return channelListingRepository.findByChannelId(channelId).stream()
-                .map(this::mapToListingResponse)
-                .collect(Collectors.toList());
+        List<ChannelListing> listings = channelListingRepository.findByChannelId(channelId);
+        return channelMapper.toListingResponses(listings);
     }
 
     @Override
@@ -60,32 +60,5 @@ public class ChannelServiceImpl implements ChannelService {
         listing.setSyncStatus(ChannelListing.SyncStatus.SYNCED);
         listing.setReportedStock(listing.getAllocatedQuota());
         channelListingRepository.save(listing);
-    }
-
-    private ChannelResponse mapToChannelResponse(Channel c) {
-        return new ChannelResponse(
-                c.getId(),
-                c.getCode(),
-                c.getName(),
-                c.getEnvironment(),
-                c.getStatus().name(),
-                c.getCreatedAt(),
-                c.getUpdatedAt()
-        );
-    }
-
-    private ChannelListingResponse mapToListingResponse(ChannelListing l) {
-        return new ChannelListingResponse(
-                l.getId(),
-                l.getChannel().getId(),
-                l.getVariant().getId(),
-                l.getVariant().getSku(),
-                l.getExternalListingId(),
-                l.getExternalSku(),
-                l.getAllocatedQuota(),
-                l.getReportedStock(),
-                l.getSyncStatus().name(),
-                l.getUpdatedAt()
-        );
     }
 }

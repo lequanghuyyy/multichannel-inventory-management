@@ -8,6 +8,7 @@ import com.octoflow.api.entity.Reservation;
 import com.octoflow.api.exception.BusinessRuleException;
 import com.octoflow.api.exception.ErrorCode;
 import com.octoflow.api.exception.ResourceNotFoundException;
+import com.octoflow.api.mapper.ReservationMapper;
 import com.octoflow.api.repository.InventoryBalanceRepository;
 import com.octoflow.api.repository.ProductVariantRepository;
 import com.octoflow.api.repository.ReservationRepository;
@@ -25,21 +26,25 @@ public class ReservationServiceImpl implements ReservationService {
     private final ReservationRepository reservationRepository;
     private final InventoryBalanceRepository balanceRepository;
     private final ProductVariantRepository variantRepository;
+    private final ReservationMapper reservationMapper;
 
     public ReservationServiceImpl(ReservationRepository reservationRepository,
                                   InventoryBalanceRepository balanceRepository,
-                                  ProductVariantRepository variantRepository) {
+                                  ProductVariantRepository variantRepository,
+                                  ReservationMapper reservationMapper) {
         this.reservationRepository = reservationRepository;
         this.balanceRepository = balanceRepository;
         this.variantRepository = variantRepository;
+        this.reservationMapper = reservationMapper;
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<ReservationResponse> listReservations() {
-        return reservationRepository.findAll().stream()
-                .map(this::mapToResponse)
-                .collect(java.util.stream.Collectors.toList());
+        List<Reservation> holds = reservationRepository.findAll();
+        return reservationMapper.toResponseList(holds, variantId ->
+                variantRepository.findById(variantId).map(ProductVariant::getSku).orElse("UNKNOWN")
+        );
     }
 
     @Override
@@ -47,7 +52,11 @@ public class ReservationServiceImpl implements ReservationService {
     public ReservationResponse getReservationById(Long reservationId) {
         Reservation hold = reservationRepository.findById(reservationId)
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.RESERVATION_NOT_FOUND, "Không tìm thấy mã giữ hàng #" + reservationId));
-        return mapToResponse(hold);
+
+        String sku = variantRepository.findById(hold.getVariantId())
+                .map(ProductVariant::getSku)
+                .orElse("UNKNOWN");
+        return reservationMapper.toResponse(hold, sku);
     }
 
     @Override
@@ -76,27 +85,7 @@ public class ReservationServiceImpl implements ReservationService {
         hold.setExpiresAt(Instant.now().plus(ttl, ChronoUnit.MINUTES));
 
         Reservation saved = reservationRepository.save(hold);
-        return mapToResponse(saved, variant.getSku());
-    }
-
-    private ReservationResponse mapToResponse(Reservation hold) {
-        String sku = variantRepository.findById(hold.getVariantId())
-                .map(ProductVariant::getSku)
-                .orElse("UNKNOWN");
-        return mapToResponse(hold, sku);
-    }
-
-    private ReservationResponse mapToResponse(Reservation hold, String sku) {
-        return new ReservationResponse(
-                hold.getId(),
-                hold.getVariantId(),
-                sku,
-                hold.getQuantity(),
-                hold.getStatus().name(),
-                hold.getOrderId(),
-                hold.getExpiresAt(),
-                hold.getCreatedAt()
-        );
+        return reservationMapper.toResponse(saved, variant.getSku());
     }
 
     @Override

@@ -10,6 +10,7 @@ import com.octoflow.api.entity.ProductVariant;
 import com.octoflow.api.exception.BusinessRuleException;
 import com.octoflow.api.exception.ErrorCode;
 import com.octoflow.api.exception.ResourceNotFoundException;
+import com.octoflow.api.mapper.InventoryMapper;
 import com.octoflow.api.repository.InventoryBalanceRepository;
 import com.octoflow.api.repository.InventoryLedgerRepository;
 import com.octoflow.api.repository.OutboxEventRepository;
@@ -29,43 +30,26 @@ public class InventoryServiceImpl implements InventoryService {
     private final ProductVariantRepository variantRepository;
     private final OutboxEventRepository outboxEventRepository;
     private final InventoryLedgerRepository ledgerRepository;
+    private final InventoryMapper inventoryMapper;
 
     public InventoryServiceImpl(InventoryBalanceRepository balanceRepository,
                                 ProductVariantRepository variantRepository,
                                 OutboxEventRepository outboxEventRepository,
-                                InventoryLedgerRepository ledgerRepository) {
+                                InventoryLedgerRepository ledgerRepository,
+                                InventoryMapper inventoryMapper) {
         this.balanceRepository = balanceRepository;
         this.variantRepository = variantRepository;
         this.outboxEventRepository = outboxEventRepository;
         this.ledgerRepository = ledgerRepository;
+        this.inventoryMapper = inventoryMapper;
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<InventorySnapshotResponse> listInventory() {
         return variantRepository.findAll().stream().map(variant -> {
-            InventoryBalance balance = balanceRepository.findByVariantId(variant.getId())
-                    .orElseGet(() -> {
-                        InventoryBalance empty = new InventoryBalance();
-                        empty.setVariantId(variant.getId());
-                        empty.setOnHand(0);
-                        empty.setReserved(0);
-                        empty.setSafetyBuffer(0);
-                        empty.setVersion(0L);
-                        return empty;
-                    });
-
-            return new InventorySnapshotResponse(
-                    variant.getSku(),
-                    variant.getId(),
-                    variant.getProduct().getId(),
-                    balance.getOnHand(),
-                    balance.getReserved(),
-                    balance.getSafetyBuffer(),
-                    balance.getAvailableToSell(),
-                    balance.getVersion(),
-                    balance.getUpdatedAt()
-            );
+            InventoryBalance balance = balanceRepository.findByVariantId(variant.getId()).orElse(null);
+            return inventoryMapper.toSnapshotResponse(variant, balance);
         }).collect(Collectors.toList());
     }
 
@@ -75,28 +59,8 @@ public class InventoryServiceImpl implements InventoryService {
         ProductVariant variant = variantRepository.findBySku(sku)
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.SKU_NOT_FOUND, "Không tìm thấy SKU " + sku));
 
-        InventoryBalance balance = balanceRepository.findByVariantId(variant.getId())
-                .orElseGet(() -> {
-                    InventoryBalance empty = new InventoryBalance();
-                    empty.setVariantId(variant.getId());
-                    empty.setOnHand(0);
-                    empty.setReserved(0);
-                    empty.setSafetyBuffer(0);
-                    empty.setVersion(0L);
-                    return empty;
-                });
-
-        return new InventorySnapshotResponse(
-                variant.getSku(),
-                variant.getId(),
-                variant.getProduct().getId(),
-                balance.getOnHand(),
-                balance.getReserved(),
-                balance.getSafetyBuffer(),
-                balance.getAvailableToSell(),
-                balance.getVersion(),
-                balance.getUpdatedAt()
-        );
+        InventoryBalance balance = balanceRepository.findByVariantId(variant.getId()).orElse(null);
+        return inventoryMapper.toSnapshotResponse(variant, balance);
     }
 
     @Override
@@ -149,17 +113,7 @@ public class InventoryServiceImpl implements InventoryService {
         event.setPayload(String.format("{\"sku\":\"%s\",\"delta\":%d,\"reason\":\"%s\"}", variant.getSku(), request.delta(), request.reason()));
         outboxEventRepository.save(event);
 
-        return new InventorySnapshotResponse(
-                variant.getSku(),
-                variant.getId(),
-                variant.getProduct().getId(),
-                balance.getOnHand(),
-                balance.getReserved(),
-                balance.getSafetyBuffer(),
-                balance.getAvailableToSell(),
-                balance.getVersion(),
-                balance.getUpdatedAt()
-        );
+        return inventoryMapper.toSnapshotResponse(variant, balance);
     }
 
     @Override
@@ -169,18 +123,10 @@ public class InventoryServiceImpl implements InventoryService {
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.SKU_NOT_FOUND, "Không tìm thấy SKU " + sku));
 
         int fetchLimit = limit > 0 ? limit : 50;
-        return ledgerRepository.findByVariantIdOrderByCreatedAtDesc(variant.getId(), PageRequest.of(0, fetchLimit))
-                .stream()
-                .map(l -> new LedgerEntryResponse(
-                        l.getId(),
-                        l.getVariantId(),
-                        l.getDelta(),
-                        l.getReason(),
-                        l.getOnHandAfter(),
-                        l.getReservedAfter(),
-                        l.getReferenceId(),
-                        l.getCreatedAt()
-                ))
-                .collect(Collectors.toList());
+        List<InventoryLedger> ledgers = ledgerRepository.findByVariantIdOrderByCreatedAtDesc(
+                variant.getId(),
+                PageRequest.of(0, fetchLimit)
+        );
+        return inventoryMapper.toLedgerEntryResponses(ledgers);
     }
 }

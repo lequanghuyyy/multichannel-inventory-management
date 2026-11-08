@@ -9,6 +9,7 @@ import com.octoflow.api.entity.ProductVariant;
 import com.octoflow.api.exception.BusinessRuleException;
 import com.octoflow.api.exception.ErrorCode;
 import com.octoflow.api.exception.ResourceNotFoundException;
+import com.octoflow.api.mapper.ProductMapper;
 import com.octoflow.api.repository.InventoryBalanceRepository;
 import com.octoflow.api.repository.ProductRepository;
 import com.octoflow.api.repository.ProductVariantRepository;
@@ -25,13 +26,16 @@ public class ProductServiceImpl implements ProductService {
     private final ProductRepository productRepository;
     private final ProductVariantRepository variantRepository;
     private final InventoryBalanceRepository balanceRepository;
+    private final ProductMapper productMapper;
 
     public ProductServiceImpl(ProductRepository productRepository,
                               ProductVariantRepository variantRepository,
-                              InventoryBalanceRepository balanceRepository) {
+                              InventoryBalanceRepository balanceRepository,
+                              ProductMapper productMapper) {
         this.productRepository = productRepository;
         this.variantRepository = variantRepository;
         this.balanceRepository = balanceRepository;
+        this.productMapper = productMapper;
     }
 
     @Override
@@ -59,21 +63,11 @@ public class ProductServiceImpl implements ProductService {
             }
         }
 
-        Product product = new Product();
-        product.setName(request.name());
-        product.setDescription(request.description());
-        product.setCategory(request.category());
-        product.setStatus(Product.Status.PUBLISHED);
-
+        Product product = productMapper.toEntity(request);
         Product savedProduct = productRepository.save(product);
 
         for (CreateProductRequest.CreateVariantRequest vReq : request.variants()) {
-            ProductVariant variant = new ProductVariant();
-            variant.setProduct(savedProduct);
-            variant.setSku(vReq.sku());
-            variant.setTitle(vReq.title());
-            variant.setPrice(vReq.price() != null ? vReq.price() : 0L);
-            variant.setCurrency(vReq.currency() != null ? vReq.currency() : "VND");
+            ProductVariant variant = productMapper.toVariantEntity(vReq, savedProduct);
             ProductVariant savedVariant = variantRepository.save(variant);
 
             InventoryBalance balance = new InventoryBalance();
@@ -126,35 +120,8 @@ public class ProductServiceImpl implements ProductService {
     }
 
     private ProductResponse mapToResponse(Product product) {
-        List<ProductResponse.VariantResponse> variants = product.getVariants().stream().map(v -> {
-            InventoryBalance balance = balanceRepository.findByVariantId(v.getId()).orElse(null);
-            int onHand = balance != null ? balance.getOnHand() : 0;
-            int reserved = balance != null ? balance.getReserved() : 0;
-            int safetyBuffer = balance != null ? balance.getSafetyBuffer() : 0;
-            int ats = balance != null ? balance.getAvailableToSell() : 0;
-
-            return new ProductResponse.VariantResponse(
-                    v.getId(),
-                    v.getSku(),
-                    v.getTitle(),
-                    v.getPrice(),
-                    v.getCurrency(),
-                    onHand,
-                    reserved,
-                    safetyBuffer,
-                    ats
-            );
-        }).collect(Collectors.toList());
-
-        return new ProductResponse(
-                product.getId(),
-                product.getName(),
-                product.getDescription(),
-                product.getCategory(),
-                product.getStatus().name(),
-                variants,
-                product.getCreatedAt(),
-                product.getUpdatedAt()
+        return productMapper.toResponse(product, variantId ->
+                balanceRepository.findByVariantId(variantId).orElse(null)
         );
     }
 }
