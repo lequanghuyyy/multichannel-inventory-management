@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -21,6 +22,13 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     Optional<Order> findByOrderNumber(String orderNumber);
 
     Optional<Order> findByChannelIdAndExternalOrderId(Long channelId, String externalOrderId);
+
+    @Query("""
+            SELECT CASE WHEN COUNT(i) > 0 THEN true ELSE false END
+            FROM OrderItem i
+            WHERE i.variantId IN :variantIds
+            """)
+    boolean existsByVariantIdIn(@Param("variantIds") Collection<Long> variantIds);
 
     /**
      * Returns the order's variant quantities without loading the Order entity. Payment

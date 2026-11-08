@@ -46,10 +46,16 @@ public class InventoryMapper {
         return new LedgerEntryResponse(
                 ledger.getId(),
                 ledger.getVariantId(),
+                ledger.getOperation(),
                 ledger.getDelta(),
                 ledger.getReason(),
+                ledger.getOnHandBefore(),
                 ledger.getOnHandAfter(),
+                ledger.getReservedBefore(),
                 ledger.getReservedAfter(),
+                ledger.getSafetyBufferBefore(),
+                ledger.getSafetyBufferAfter(),
+                ledger.getActorName(),
                 ledger.getReferenceId(),
                 ledger.getCreatedAt()
         );

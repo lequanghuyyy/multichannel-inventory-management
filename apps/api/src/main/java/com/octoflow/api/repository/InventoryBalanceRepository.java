@@ -9,6 +9,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
 import java.util.Optional;
 
 @Repository
@@ -32,4 +33,16 @@ public interface InventoryBalanceRepository extends JpaRepository<InventoryBalan
     Optional<InventoryBalance> findByVariantIdWithLock(@Param("variantId") Long variantId);
 
     Optional<InventoryBalance> findByVariantId(Long variantId);
+
+    /**
+     * Guards catalog deletion even when historical side tables are empty: any non-zero physical,
+     * reserved, or buffer quantity represents real stock that must not disappear with a product.
+     */
+    @Query("""
+            SELECT CASE WHEN COUNT(b) > 0 THEN true ELSE false END
+            FROM InventoryBalance b
+            WHERE b.variantId IN :variantIds
+              AND (b.onHand <> 0 OR b.reserved <> 0 OR b.safetyBuffer <> 0)
+            """)
+    boolean existsWithNonZeroStock(@Param("variantIds") Collection<Long> variantIds);
 }
