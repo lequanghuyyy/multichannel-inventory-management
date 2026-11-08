@@ -2,6 +2,14 @@
 
 Hệ thống quản lý sản phẩm, tồn kho trung tâm và đồng bộ đa kênh (POS, Shopify, WooCommerce, eBay) dành cho người bán lẻ (AI-driven Seller App).
 
+## 🛠️ Ngăn xếp Công nghệ (Tech Stack)
+
+Chi tiết đặc tả kiến trúc kỹ thuật được mô tả đầy đủ tại [**TECH_STACK.md**](TECH_STACK.md):
+- **Backend Core:** **Java 21 LTS**, **Spring Boot 3.x** (Spring Security, Spring Data JPA, Flyway, HikariCP, SseEmitter, RestClient, Actuator, springdoc-openapi).
+- **Frontend Web & Mobile:** **React 19**, **TypeScript ~5.9**, **Vite 7**, **Tailwind CSS v4**, **Capacitor 8** (Android / iOS).
+- **Cơ sở dữ liệu:** **PostgreSQL 17** với kiểm soát tranh chấp bằng Pessimistic Row-level Locking (`SELECT FOR UPDATE`).
+- **AI / ML Microservices:** **Python 3.11+**, **FastAPI**, **Uvicorn**, Scikit-learn, LightGBM, Statsmodels, PyTorch (Dự báo nhu cầu, giám sát sức khỏe đồng bộ đa kênh).
+
 ## 📖 Tài liệu dự án
 
 Hồ sơ bàn giao nghiệp vụ và đặc tả yêu cầu phần mềm chi tiết được lưu trong thư mục [`docs/`](docs/):
