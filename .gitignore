@@ -16,6 +16,9 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Local agents & tooling
+.agents/
+
 # Logs & temp
 *.log
 *.tmp
