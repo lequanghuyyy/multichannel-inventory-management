@@ -3,10 +3,15 @@ package com.octoflow.api;
 import com.octoflow.api.dto.request.CreateOrderRequest;
 import com.octoflow.api.dto.request.CreateReceiptRequest;
 import com.octoflow.api.dto.request.CreateProductRequest;
+import com.octoflow.api.dto.request.AddProductVariantRequest;
+import com.octoflow.api.dto.request.CancelReceiptRequest;
+import com.octoflow.api.dto.request.CloseShortRequest;
 import com.octoflow.api.dto.request.InventoryAdjustRequest;
 import com.octoflow.api.dto.request.ReceiveItemsRequest;
 import com.octoflow.api.dto.request.ReserveStockRequest;
 import com.octoflow.api.dto.request.UpdateProductRequest;
+import com.octoflow.api.dto.request.UpdateProductVariantRequest;
+import com.octoflow.api.dto.request.UpdateReceiptRequest;
 import com.octoflow.api.dto.command.ChannelOrderCommand;
 import com.octoflow.api.dto.response.OrderResponse;
 import com.octoflow.api.dto.response.ReceiptResponse;
@@ -96,7 +101,7 @@ class FoundationPostgresIntegrationTest {
 
     @Test
     void cleanPostgresRunsAllMigrationsAndJPAValidatesTheSchema() {
-        assertEquals(4, flyway.info().applied().length);
+        assertEquals(5, flyway.info().applied().length);
         assertTrue(jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'idempotency_records'", Integer.class) == 1);
         assertTrue(jdbcTemplate.queryForObject(
@@ -105,6 +110,12 @@ class FoundationPostgresIntegrationTest {
                 "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'orders' AND column_name = 'channel_id'", Integer.class) == 1);
         assertTrue(jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_orders_channel_external_order'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'receipts' AND column_name = 'version'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'receipt_events'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'receipt_event_items'", Integer.class) == 1);
         assertEquals(0, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM users", Integer.class));
     }
 
@@ -769,44 +780,57 @@ class FoundationPostgresIntegrationTest {
     }
 
     @Test
-    void partialReceiptReceivingIsCumulativeAndLedgerBooksOnlyStockIncreases() {
+    void partialReceiptReceivingAddsOnlyEachBatchDeltaAndLedgerBooksOnlyAcceptedStock() {
         Fixture fixture = fixtureWithoutBalance();
         var receipt = receiptService.createReceipt(new CreateReceiptRequest("Supplier",
                         List.of(new CreateReceiptRequest.ReceiptItemRequest(fixture.variantId(), 5, 100L))),
                 "receipt-partial-create-" + UUID.randomUUID());
         Long itemId = receipt.items().getFirst().id();
+        String firstBatchKey = "receipt-partial-a-" + UUID.randomUUID();
 
         var first = receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
                         new ReceiveItemsRequest.ItemInspection(itemId, 2, 0))),
-                "receipt-partial-a-" + UUID.randomUUID());
-        assertEquals("RECEIVING", first.status());
+                firstBatchKey);
+        assertEquals("PARTIALLY_RECEIVED", first.status());
+        assertEquals(1L, first.version());
         assertEquals(2, first.items().getFirst().acceptedQty());
+        assertEquals(3, first.items().getFirst().remainingQty());
+        assertEquals(1, first.batches().size());
         assertEquals(2, balance(fixture).getOnHand());
         assertEquals(1, ledgerCount(fixture));
         assertEquals(1, outboxCount(fixture));
 
-        // Repeating the same cumulative counts with a new key must not add stock or ledger rows.
+        // Replaying the same physical batch with the same key must not add stock again.
         var repeat = receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
                         new ReceiveItemsRequest.ItemInspection(itemId, 2, 0))),
-                "receipt-partial-b-" + UUID.randomUUID());
-        assertEquals("RECEIVING", repeat.status());
-        assertEquals(2, repeat.items().getFirst().acceptedQty());
+                firstBatchKey);
+        assertEquals(first, repeat);
         assertEquals(2, balance(fixture).getOnHand());
         assertEquals(1, ledgerCount(fixture));
         assertEquals(1, outboxCount(fixture));
 
+        // A fresh key with no accepted/rejected quantity is not a meaningful batch.
+        BusinessRuleException emptyBatch = assertThrows(BusinessRuleException.class,
+                () -> receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
+                                new ReceiveItemsRequest.ItemInspection(itemId, 0, 0))),
+                        "receipt-partial-empty-" + UUID.randomUUID()));
+        assertEquals("BAD_REQUEST", emptyBatch.getErrorCode().getCode());
+
         var completed = receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
-                        new ReceiveItemsRequest.ItemInspection(itemId, 5, 0))),
+                        new ReceiveItemsRequest.ItemInspection(itemId, 3, 0))),
                 "receipt-partial-c-" + UUID.randomUUID());
-        assertEquals("COMPLETED", completed.status());
+        assertEquals("RECEIVED", completed.status());
+        assertEquals(2L, completed.version());
         assertEquals(5, completed.items().getFirst().acceptedQty());
+        assertEquals(0, completed.items().getFirst().remainingQty());
+        assertEquals(2, completed.batches().size());
         assertEquals(5, balance(fixture).getOnHand());
         assertEquals(2, ledgerCount(fixture));
         assertEquals(2, outboxCount(fixture));
 
         BusinessRuleException closed = assertThrows(BusinessRuleException.class,
                 () -> receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
-                                new ReceiveItemsRequest.ItemInspection(itemId, 5, 0))),
+                                new ReceiveItemsRequest.ItemInspection(itemId, 1, 0))),
                         "receipt-partial-d-" + UUID.randomUUID()));
         assertEquals("BAD_REQUEST", closed.getErrorCode().getCode());
 
@@ -817,7 +841,7 @@ class FoundationPostgresIntegrationTest {
     }
 
     @Test
-    void receiptReceivingValidatesExpectedQuantitiesAndMonotonicCounts() {
+    void receiptReceivingValidatesBatchQuantitiesAndRejectedOnlyBatchesDoNotMoveStock() {
         Fixture first = fixtureWithoutBalance();
         Fixture second = fixtureWithoutBalance();
         saveBalance(first, 0, 0, 0);
@@ -833,7 +857,7 @@ class FoundationPostgresIntegrationTest {
 
         BusinessRuleException overExpected = assertThrows(BusinessRuleException.class,
                 () -> receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
-                                new ReceiveItemsRequest.ItemInspection(firstItem, 2, 2))),
+                                new ReceiveItemsRequest.ItemInspection(firstItem, 2, 2, "damaged"))),
                         "receipt-over-" + UUID.randomUUID()));
         assertEquals("BAD_REQUEST", overExpected.getErrorCode().getCode());
         assertEquals(0, balance(first).getOnHand());
@@ -852,26 +876,74 @@ class FoundationPostgresIntegrationTest {
                         "receipt-unknown-" + UUID.randomUUID()));
         assertEquals("BAD_REQUEST", unknownLine.getErrorCode().getCode());
 
+        BusinessRuleException negative = assertThrows(BusinessRuleException.class,
+                () -> receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
+                                new ReceiveItemsRequest.ItemInspection(firstItem, 1, -1))),
+                        "receipt-negative-" + UUID.randomUUID()));
+        assertEquals("BAD_REQUEST", negative.getErrorCode().getCode());
+
+        BusinessRuleException missingReason = assertThrows(BusinessRuleException.class,
+                () -> receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
+                                new ReceiveItemsRequest.ItemInspection(firstItem, 1, 1))),
+                        "receipt-missing-reason-" + UUID.randomUUID()));
+        assertEquals("BAD_REQUEST", missingReason.getErrorCode().getCode());
+
+        // The preview total is receipt-wide: the untouched second line still counts as remaining.
+        var multiLinePreview = receiptService.previewReceive(receipt.id(), new ReceiveItemsRequest(List.of(
+                new ReceiveItemsRequest.ItemInspection(firstItem, 1, 1, "torn packaging"))));
+        assertTrue(multiLinePreview.valid());
+        assertEquals(3, multiLinePreview.remainingTotal());
+        assertEquals(0, ledgerCount(first));
+        assertEquals(0, ledgerCount(second));
+
         var partial = receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
-                        new ReceiveItemsRequest.ItemInspection(firstItem, 1, 1))),
+                        new ReceiveItemsRequest.ItemInspection(firstItem, 1, 1, "torn packaging"))),
                 "receipt-partial-" + UUID.randomUUID());
-        assertEquals("RECEIVING", partial.status());
+        assertEquals("PARTIALLY_RECEIVED", partial.status());
         assertEquals(1, balance(first).getOnHand());
+        assertEquals(3, partial.remainingTotal());
+        assertEquals(1, ledgerCount(first));
+        assertEquals(1, outboxCount(first));
 
-        BusinessRuleException decreasedRejected = assertThrows(BusinessRuleException.class,
-                () -> receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
-                                new ReceiveItemsRequest.ItemInspection(firstItem, 1, 0))),
-                        "receipt-decrease-rejected-" + UUID.randomUUID()));
-        assertEquals("BAD_REQUEST", decreasedRejected.getErrorCode().getCode());
-
-        BusinessRuleException decreasedAccepted = assertThrows(BusinessRuleException.class,
-                () -> receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
-                                new ReceiveItemsRequest.ItemInspection(firstItem, 0, 1))),
-                        "receipt-decrease-accepted-" + UUID.randomUUID()));
-        assertEquals("BAD_REQUEST", decreasedAccepted.getErrorCode().getCode());
-
+        // Rejected-only batches still produce an audit event, but never an inventory movement.
+        var rejectedOnly = receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
+                        new ReceiveItemsRequest.ItemInspection(firstItem, 0, 1, "water damage"))),
+                "receipt-rejected-only-" + UUID.randomUUID());
+        assertEquals("PARTIALLY_RECEIVED", rejectedOnly.status());
+        // The version must advance even though the status stays PARTIALLY_RECEIVED.
+        assertEquals(2L, rejectedOnly.version());
+        assertEquals(0, rejectedOnly.items().getFirst().remainingQty());
+        assertEquals(2, rejectedOnly.batches().size());
         assertEquals(1, balance(first).getOnHand());
         assertEquals(0, balance(second).getOnHand());
+        assertEquals(1, ledgerCount(first));
+        assertEquals(1, outboxCount(first));
+
+        BusinessRuleException firstComplete = assertThrows(BusinessRuleException.class,
+                () -> receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
+                                new ReceiveItemsRequest.ItemInspection(firstItem, 1, 0))),
+                        "receipt-first-complete-" + UUID.randomUUID()));
+        assertEquals("BAD_REQUEST", firstComplete.getErrorCode().getCode());
+
+        BusinessRuleException overRemaining = assertThrows(BusinessRuleException.class,
+                () -> receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
+                                new ReceiveItemsRequest.ItemInspection(secondItem, 3, 0))),
+                        "receipt-over-remaining-" + UUID.randomUUID()));
+        assertEquals("BAD_REQUEST", overRemaining.getErrorCode().getCode());
+
+        var completed = receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
+                        new ReceiveItemsRequest.ItemInspection(secondItem, 2, 0))),
+                "receipt-complete-" + UUID.randomUUID());
+        assertEquals("RECEIVED", completed.status());
+        assertEquals(3, completed.acceptedTotal());
+        assertEquals(2, completed.rejectedTotal());
+        assertEquals(0, completed.remainingTotal());
+        assertEquals(1, balance(first).getOnHand());
+        assertEquals(2, balance(second).getOnHand());
+        assertEquals(1, ledgerCount(first));
+        assertEquals(1, ledgerCount(second));
+        assertEquals(1, outboxCount(first));
+        assertEquals(1, outboxCount(second));
     }
 
     @Test
@@ -896,8 +968,8 @@ class FoundationPostgresIntegrationTest {
             ready.await();
             start.countDown();
 
-            assertEquals("COMPLETED", first.get(15, TimeUnit.SECONDS).status());
-            assertEquals("COMPLETED", second.get(15, TimeUnit.SECONDS).status());
+            assertEquals("RECEIVED", first.get(15, TimeUnit.SECONDS).status());
+            assertEquals("RECEIVED", second.get(15, TimeUnit.SECONDS).status());
         } finally {
             pool.shutdownNow();
         }
@@ -905,6 +977,412 @@ class FoundationPostgresIntegrationTest {
         assertEquals(2, balance(fixture).getOnHand());
         assertEquals(2, ledgerCount(fixture));
         assertEquals(2, outboxCount(fixture));
+    }
+
+    @Test
+    void scenarioA_productSkuReceivesTwoIndependentBatches() {
+        String sku = "SCEN-A-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+        var product = productService.createProduct(new CreateProductRequest("Scenario A", null, null,
+                        List.of(new CreateProductRequest.CreateVariantRequest(sku, "Default", 1000L, "VND", 0))),
+                "scenario-a-product-" + UUID.randomUUID());
+        Fixture fixture = new Fixture(product.id(), product.variants().getFirst().id(), sku);
+        assertEquals(0, balance(fixture).getOnHand());
+
+        var receipt = receiptService.createReceipt(new CreateReceiptRequest("Scenario supplier", null,
+                        List.of(new CreateReceiptRequest.ReceiptItemRequest(fixture.variantId(), 10, 500L))),
+                "scenario-a-receipt-" + UUID.randomUUID());
+        Long itemId = receipt.items().getFirst().id();
+        assertEquals("DRAFT", receipt.status());
+        assertEquals(0, balance(fixture).getOnHand());
+        assertEquals(0, ledgerCount(fixture));
+
+        ReceiveItemsRequest firstBatch = new ReceiveItemsRequest(List.of(
+                new ReceiveItemsRequest.ItemInspection(itemId, 4, 1, "torn carton")));
+        var preview = receiptService.previewReceive(receipt.id(), firstBatch);
+        assertTrue(preview.valid());
+        assertEquals(4, preview.acceptedTotal());
+        assertEquals(1, preview.rejectedTotal());
+        assertEquals(5, preview.remainingTotal());
+        assertEquals(4, preview.items().getFirst().projectedOnHand());
+        assertEquals(0, balance(fixture).getOnHand());
+        assertEquals(0, ledgerCount(fixture));
+
+        var first = receiptService.receiveStock(receipt.id(), firstBatch,
+                "scenario-a-batch-1-" + UUID.randomUUID());
+        assertEquals("PARTIALLY_RECEIVED", first.status());
+        assertEquals(4, first.items().getFirst().acceptedQty());
+        assertEquals(1, first.items().getFirst().rejectedQty());
+        assertEquals(5, first.items().getFirst().remainingQty());
+        assertEquals(1, first.batches().size());
+        assertEquals(4, balance(fixture).getOnHand());
+        assertEquals(1, ledgerCount(fixture));
+        assertEquals(1, outboxCount(fixture));
+
+        var completed = receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
+                        new ReceiveItemsRequest.ItemInspection(itemId, 3, 2, "crushed boxes"))),
+                "scenario-a-batch-2-" + UUID.randomUUID());
+        assertEquals("RECEIVED", completed.status());
+        assertEquals(7, completed.acceptedTotal());
+        assertEquals(3, completed.rejectedTotal());
+        assertEquals(0, completed.remainingTotal());
+        assertEquals(2, completed.batches().size());
+        assertEquals(4, completed.batches().get(0).items().getFirst().acceptedQty());
+        assertEquals(3, completed.batches().get(1).items().getFirst().acceptedQty());
+        assertEquals(sku, completed.items().getFirst().sku());
+        assertEquals(7, balance(fixture).getOnHand());
+        assertEquals(List.of(4, 3), jdbcTemplate.queryForList(
+                "SELECT delta FROM inventory_ledger WHERE variant_id = ? ORDER BY id",
+                Integer.class, fixture.variantId()));
+        assertEquals(2, outboxCount(fixture));
+    }
+
+    @Test
+    void scenarioB_closeShortKeepsMissingQuantityOutOfStockAndStopsReceiving() {
+        Fixture fixture = fixtureWithoutBalance();
+        var receipt = receiptService.createReceipt(new CreateReceiptRequest("Scenario B supplier",
+                        List.of(new CreateReceiptRequest.ReceiptItemRequest(fixture.variantId(), 10, 500L))),
+                "scenario-b-receipt-" + UUID.randomUUID());
+        Long itemId = receipt.items().getFirst().id();
+
+        var partial = receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
+                        new ReceiveItemsRequest.ItemInspection(itemId, 6, 0))),
+                "scenario-b-receive-" + UUID.randomUUID());
+        assertEquals("PARTIALLY_RECEIVED", partial.status());
+        assertEquals(6, balance(fixture).getOnHand());
+        assertEquals(4, partial.remainingTotal());
+
+        var closed = receiptService.closeShort(receipt.id(), new CloseShortRequest(
+                        "Supplier could not deliver the rest", partial.version()),
+                "scenario-b-close-" + UUID.randomUUID());
+        assertEquals("CLOSED_SHORT", closed.status());
+        assertEquals("Supplier could not deliver the rest", closed.closeShortReason());
+        assertNotNull(closed.closedShortAt());
+        assertEquals(4, closed.remainingTotal());
+        assertEquals(6, balance(fixture).getOnHand());
+        assertEquals(1, ledgerCount(fixture));
+        assertEquals(1, outboxCount(fixture));
+
+        BusinessRuleException receiveClosed = assertThrows(BusinessRuleException.class,
+                () -> receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
+                                new ReceiveItemsRequest.ItemInspection(itemId, 1, 0))),
+                        "scenario-b-after-close-" + UUID.randomUUID()));
+        assertEquals("BAD_REQUEST", receiveClosed.getErrorCode().getCode());
+        assertEquals(6, balance(fixture).getOnHand());
+
+        // A draft with nothing received is cancelled, not closed short.
+        var untouchedDraft = receiptService.createReceipt(new CreateReceiptRequest("Scenario B draft",
+                        List.of(new CreateReceiptRequest.ReceiptItemRequest(fixture.variantId(), 2, 100L))),
+                "scenario-b-draft-" + UUID.randomUUID());
+        BusinessRuleException closeDraft = assertThrows(BusinessRuleException.class,
+                () -> receiptService.closeShort(untouchedDraft.id(), new CloseShortRequest(
+                                "supplier never shipped", untouchedDraft.version()),
+                        "scenario-b-close-draft-" + UUID.randomUUID()));
+        assertEquals("BAD_REQUEST", closeDraft.getErrorCode().getCode());
+    }
+
+    @Test
+    void scenarioC_reserveSellAndReleaseKeepAvailableToSellConsistent() {
+        Fixture fixture = fixture(7, 0, 1);
+        var hold = reservationService.reserve(
+                new ReserveStockRequest(fixture.sku(), 2, null, 15),
+                "scenario-c-reserve-" + UUID.randomUUID());
+        assertEquals(2, balance(fixture).getReserved());
+        var afterReserve = inventoryService.getInventoryBySku(fixture.sku());
+        assertEquals(7, afterReserve.onHand());
+        assertEquals(2, afterReserve.reserved());
+        assertEquals(1, afterReserve.safetyBuffer());
+        assertEquals(4, afterReserve.availableToSell());
+
+        String confirmKey = "scenario-c-confirm-" + UUID.randomUUID();
+        reservationService.confirmSale(hold.id(), confirmKey);
+        reservationService.confirmSale(hold.id(), confirmKey);
+        var afterSale = inventoryService.getInventoryBySku(fixture.sku());
+        assertEquals(5, afterSale.onHand());
+        assertEquals(0, afterSale.reserved());
+        assertEquals(4, afterSale.availableToSell());
+
+        var releasedHold = reservationService.reserve(
+                new ReserveStockRequest(fixture.sku(), 2, null, 15),
+                "scenario-c-reserve-release-" + UUID.randomUUID());
+        reservationService.release(releasedHold.id());
+        var afterRelease = inventoryService.getInventoryBySku(fixture.sku());
+        assertEquals(5, afterRelease.onHand());
+        assertEquals(0, afterRelease.reserved());
+        assertEquals(4, afterRelease.availableToSell());
+        assertEquals(Reservation.Status.CANCELLED,
+                reservationRepository.findById(releasedHold.id()).orElseThrow().getStatus());
+    }
+
+    @Test
+    void scenarioD_concurrentBatchesAndMultiSkuRollbackKeepBalancesLedgerAndOutboxConsistent() throws Exception {
+        Fixture fixture = fixtureWithoutBalance();
+        var receipt = receiptService.createReceipt(new CreateReceiptRequest("Scenario D supplier",
+                        List.of(new CreateReceiptRequest.ReceiptItemRequest(fixture.variantId(), 10, 500L))),
+                "scenario-d-receipt-" + UUID.randomUUID());
+        Long itemId = receipt.items().getFirst().id();
+        ReceiveItemsRequest sameBatch = new ReceiveItemsRequest(List.of(
+                new ReceiveItemsRequest.ItemInspection(itemId, 4, 0)));
+        String sameKey = "scenario-d-same-key-" + UUID.randomUUID();
+
+        CountDownLatch sameReady = new CountDownLatch(2);
+        CountDownLatch sameStart = new CountDownLatch(1);
+        ExecutorService samePool = Executors.newFixedThreadPool(2);
+        try {
+            Future<ReceiptResponse> first = samePool.submit(() ->
+                    receiveBatchAfterGate(receipt.id(), sameBatch, sameKey, sameReady, sameStart));
+            Future<ReceiptResponse> second = samePool.submit(() ->
+                    receiveBatchAfterGate(receipt.id(), sameBatch, sameKey, sameReady, sameStart));
+            sameReady.await();
+            sameStart.countDown();
+            assertEquals(4, first.get(15, TimeUnit.SECONDS).acceptedTotal());
+            assertEquals(4, second.get(15, TimeUnit.SECONDS).acceptedTotal());
+        } finally {
+            samePool.shutdownNow();
+        }
+        assertEquals(4, balance(fixture).getOnHand());
+        assertEquals(1, ledgerCount(fixture));
+        assertEquals(1, outboxCount(fixture));
+
+        ReceiveItemsRequest overBatch = new ReceiveItemsRequest(List.of(
+                new ReceiveItemsRequest.ItemInspection(itemId, 6, 0)));
+        CountDownLatch overReady = new CountDownLatch(2);
+        CountDownLatch overStart = new CountDownLatch(1);
+        ExecutorService overPool = Executors.newFixedThreadPool(2);
+        try {
+            Future<Boolean> first = overPool.submit(() -> tryReceiveAfterGate(receipt.id(), overBatch,
+                    "scenario-d-over-a-" + UUID.randomUUID(), overReady, overStart));
+            Future<Boolean> second = overPool.submit(() -> tryReceiveAfterGate(receipt.id(), overBatch,
+                    "scenario-d-over-b-" + UUID.randomUUID(), overReady, overStart));
+            overReady.await();
+            overStart.countDown();
+            assertTrue(first.get(15, TimeUnit.SECONDS) ^ second.get(15, TimeUnit.SECONDS));
+        } finally {
+            overPool.shutdownNow();
+        }
+        assertEquals(10, balance(fixture).getOnHand());
+        assertEquals(2, ledgerCount(fixture));
+        assertEquals(2, outboxCount(fixture));
+        assertEquals("RECEIVED", receiptRepository.findById(receipt.id()).orElseThrow().getStatus().name());
+
+        // A second SKU whose balance cannot accept the batch forces the whole multi-SKU batch to
+        // roll back after the first balance has already been touched in memory.
+        Fixture firstLine = fixtureWithoutBalance();
+        Fixture overflowLine = fixtureWithoutBalance();
+        saveBalance(firstLine, 0, 0, 0);
+        saveBalance(overflowLine, Integer.MAX_VALUE - 1, 0, 0);
+        var rollbackReceipt = receiptService.createReceipt(new CreateReceiptRequest("Rollback supplier",
+                        List.of(new CreateReceiptRequest.ReceiptItemRequest(firstLine.variantId(), 2, 100L),
+                                new CreateReceiptRequest.ReceiptItemRequest(overflowLine.variantId(), 2, 100L))),
+                "scenario-d-rollback-receipt-" + UUID.randomUUID());
+        Long firstLineItem = rollbackReceipt.items().stream()
+                .filter(item -> item.variantId().equals(firstLine.variantId())).findFirst().orElseThrow().id();
+        Long overflowItem = rollbackReceipt.items().stream()
+                .filter(item -> item.variantId().equals(overflowLine.variantId())).findFirst().orElseThrow().id();
+
+        BusinessRuleException rollback = assertThrows(BusinessRuleException.class,
+                () -> receiptService.receiveStock(rollbackReceipt.id(), new ReceiveItemsRequest(List.of(
+                                new ReceiveItemsRequest.ItemInspection(firstLineItem, 2, 0),
+                                new ReceiveItemsRequest.ItemInspection(overflowItem, 2, 0))),
+                        "scenario-d-rollback-" + UUID.randomUUID()));
+        assertEquals("INVALID_STOCK_BALANCE", rollback.getErrorCode().getCode());
+        assertEquals(0, balance(firstLine).getOnHand());
+        assertEquals(Integer.MAX_VALUE - 1, balance(overflowLine).getOnHand());
+        assertEquals(0, ledgerCount(firstLine));
+        assertEquals(0, ledgerCount(overflowLine));
+        assertEquals(0, outboxCount(firstLine));
+        assertEquals(0, outboxCount(overflowLine));
+        assertEquals("DRAFT", receiptRepository.findById(rollbackReceipt.id()).orElseThrow().getStatus().name());
+        assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM receipt_events WHERE receipt_id = ? AND event_type = 'RECEIVED'",
+                Integer.class, rollbackReceipt.id()));
+    }
+
+    @Test
+    void draftReceiptCanBeUpdatedAndCancelledWithoutMovingStock() {
+        Fixture fixture = fixtureWithoutBalance();
+        Fixture second = fixtureWithoutBalance();
+        var receipt = receiptService.createReceipt(new CreateReceiptRequest("Original supplier", "first note",
+                        List.of(new CreateReceiptRequest.ReceiptItemRequest(fixture.variantId(), 10, 100L))),
+                "draft-update-create-" + UUID.randomUUID());
+        assertEquals(0L, receipt.version());
+
+        var updated = receiptService.updateReceipt(receipt.id(), new UpdateReceiptRequest(
+                        "Updated supplier", "updated note",
+                        List.of(new CreateReceiptRequest.ReceiptItemRequest(fixture.variantId(), 12, 100L),
+                                new CreateReceiptRequest.ReceiptItemRequest(second.variantId(), 3, 100L)),
+                        receipt.version()),
+                "draft-update-" + UUID.randomUUID());
+        assertEquals("Updated supplier", updated.supplierName());
+        assertEquals("updated note", updated.note());
+        assertEquals(2, updated.items().size());
+        assertEquals(12, updated.items().get(0).expectedQty());
+        assertEquals(1L, updated.version());
+
+        BusinessRuleException stale = assertThrows(BusinessRuleException.class,
+                () -> receiptService.updateReceipt(receipt.id(), new UpdateReceiptRequest(
+                                "Stale supplier", null,
+                                List.of(new CreateReceiptRequest.ReceiptItemRequest(fixture.variantId(), 5, 100L)),
+                                receipt.version()),
+                        "draft-update-stale-" + UUID.randomUUID()));
+        assertEquals("STALE_VERSION", stale.getErrorCode().getCode());
+
+        var cancelled = receiptService.cancelReceipt(receipt.id(), new CancelReceiptRequest(
+                        "duplicate purchase order", updated.version()),
+                "draft-cancel-" + UUID.randomUUID());
+        assertEquals("CANCELLED", cancelled.status());
+        assertEquals("duplicate purchase order", cancelled.cancelReason());
+        assertNotNull(cancelled.cancelledAt());
+        // Draft edits and cancellation never create or move an inventory balance.
+        assertFalse(balanceRepository.findByVariantId(fixture.variantId()).isPresent());
+        assertEquals(0, ledgerCount(fixture));
+        assertEquals(0, outboxCount(fixture));
+
+        BusinessRuleException receiveCancelled = assertThrows(BusinessRuleException.class,
+                () -> receiptService.receiveStock(receipt.id(), new ReceiveItemsRequest(List.of(
+                                new ReceiveItemsRequest.ItemInspection(updated.items().getFirst().id(), 1, 0))),
+                        "draft-cancelled-receive-" + UUID.randomUUID()));
+        assertEquals("BAD_REQUEST", receiveCancelled.getErrorCode().getCode());
+    }
+
+    @Test
+    void productVariantAddUpdateLifecycleAndDeletionSafeguards() {
+        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase();
+        String firstSku = "LIFE-A-" + suffix;
+        String secondSku = "LIFE-B-" + suffix;
+        String renamedSku = "LIFE-C-" + suffix;
+        var product = productService.createProduct(new CreateProductRequest("Lifecycle product", null, null,
+                        List.of(new CreateProductRequest.CreateVariantRequest(firstSku, "Default", 1000L, "VND", 0))),
+                "lifecycle-product-" + UUID.randomUUID());
+        Long firstVariantId = product.variants().getFirst().id();
+
+        var added = productService.addVariant(product.id(),
+                new AddProductVariantRequest(secondSku, "Second", 2000L, "VND", 0),
+                "lifecycle-add-" + UUID.randomUUID());
+        assertEquals(0, balanceRepository.findByVariantId(added.id()).orElseThrow().getOnHand());
+        assertEquals(0, ledgerRepository.findByVariantIdOrderByCreatedAtDesc(added.id(),
+                org.springframework.data.domain.PageRequest.of(0, 10)).size());
+
+        BusinessRuleException duplicateSku = assertThrows(BusinessRuleException.class,
+                () -> productService.addVariant(product.id(),
+                        new AddProductVariantRequest(secondSku, "Duplicate", 2000L, "VND", 0),
+                        "lifecycle-duplicate-" + UUID.randomUUID()));
+        assertEquals("DUPLICATE_SKU", duplicateSku.getErrorCode().getCode());
+
+        BusinessRuleException openingStock = assertThrows(BusinessRuleException.class,
+                () -> productService.addVariant(product.id(),
+                        new AddProductVariantRequest("LIFE-D-" + suffix, "Opening", 2000L, "VND", 1),
+                        "lifecycle-opening-" + UUID.randomUUID()));
+        assertEquals("BAD_REQUEST", openingStock.getErrorCode().getCode());
+
+        var updatedVariant = productService.updateVariant(product.id(), added.id(),
+                new UpdateProductVariantRequest(null, "Renamed", 2500L, "USD", null));
+        assertEquals("Renamed", updatedVariant.title());
+        assertEquals(2500L, updatedVariant.price());
+        assertEquals("USD", updatedVariant.currency());
+
+        BusinessRuleException skuWithoutReason = assertThrows(BusinessRuleException.class,
+                () -> productService.updateVariant(product.id(), added.id(),
+                        new UpdateProductVariantRequest(renamedSku, null, null, null, null)));
+        assertEquals("BAD_REQUEST", skuWithoutReason.getErrorCode().getCode());
+
+        var renamed = productService.updateVariant(product.id(), added.id(),
+                new UpdateProductVariantRequest(renamedSku, null, null, null, "correct SKU typo"));
+        assertEquals(renamedSku, renamed.sku());
+
+        BusinessRuleException duplicateRename = assertThrows(BusinessRuleException.class,
+                () -> productService.updateVariant(product.id(), added.id(),
+                        new UpdateProductVariantRequest(firstSku, null, null, null, "collision")));
+        assertEquals("DUPLICATE_SKU", duplicateRename.getErrorCode().getCode());
+
+        var published = productService.updateProduct(product.id(),
+                new UpdateProductRequest(null, null, null, "PUBLISHED"));
+        assertEquals("PUBLISHED", published.status());
+        BusinessRuleException backwards = assertThrows(BusinessRuleException.class,
+                () -> productService.updateProduct(product.id(),
+                        new UpdateProductRequest(null, null, null, "DRAFT")));
+        assertEquals("BAD_REQUEST", backwards.getErrorCode().getCode());
+
+        var archived = productService.updateProduct(product.id(),
+                new UpdateProductRequest(null, null, null, "ARCHIVED"));
+        assertEquals("ARCHIVED", archived.status());
+        BusinessRuleException editArchived = assertThrows(BusinessRuleException.class,
+                () -> productService.updateProduct(product.id(),
+                        new UpdateProductRequest("Renamed while archived", null, null, null)));
+        assertEquals("BAD_REQUEST", editArchived.getErrorCode().getCode());
+        BusinessRuleException addToArchived = assertThrows(BusinessRuleException.class,
+                () -> productService.addVariant(product.id(),
+                        new AddProductVariantRequest("LIFE-E-" + suffix, "Archived", 1L, "VND", 0),
+                        "lifecycle-archived-add-" + UUID.randomUUID()));
+        assertEquals("BAD_REQUEST", addToArchived.getErrorCode().getCode());
+
+        var restored = productService.updateProduct(product.id(),
+                new UpdateProductRequest(null, null, null, "DRAFT"));
+        assertEquals("DRAFT", restored.status());
+
+        var clean = productService.createProduct(new CreateProductRequest("Clean delete", null, null,
+                        List.of(new CreateProductRequest.CreateVariantRequest("CLEAN-" + suffix, "Default", 1L, "VND", 0))),
+                "clean-product-" + UUID.randomUUID());
+        productService.deleteProduct(clean.id());
+        assertFalse(productRepository.existsById(clean.id()));
+
+        // Even without ledger rows, non-zero physical stock blocks deletion.
+        String stockedSku = "STOCK-" + suffix;
+        var stocked = productService.createProduct(new CreateProductRequest("Stocked delete", null, null,
+                        List.of(new CreateProductRequest.CreateVariantRequest(stockedSku, "Default", 1L, "VND", 0))),
+                "stocked-product-" + UUID.randomUUID());
+        jdbcTemplate.update("UPDATE inventory_balances SET on_hand = 1 WHERE variant_id = ?",
+                stocked.variants().getFirst().id());
+        ApiException hasStock = assertThrows(ApiException.class,
+                () -> productService.deleteProduct(stocked.id()));
+        assertEquals("PRODUCT_HAS_INVENTORY_HISTORY", hasStock.getErrorCode().getCode());
+
+        // The first variant is referenced by a draft receipt; neither catalog row may be deleted.
+        receiptService.createReceipt(new CreateReceiptRequest("Delete guard",
+                        List.of(new CreateReceiptRequest.ReceiptItemRequest(firstVariantId, 1, 100L))),
+                "delete-guard-receipt-" + UUID.randomUUID());
+        ApiException hasReceipt = assertThrows(ApiException.class,
+                () -> productService.deleteProduct(product.id()));
+        assertEquals("PRODUCT_HAS_INVENTORY_HISTORY", hasReceipt.getErrorCode().getCode());
+    }
+
+    @Test
+    void inventoryAdjustmentCanSetSafetyBufferAndLedgerExplainsTheBalanceChange() {
+        Fixture fixture = fixture(5, 0, 0);
+        var snapshot = inventoryService.adjustInventory(
+                new InventoryAdjustRequest(fixture.sku(), 0, "set safety buffer", null, 2),
+                "buffer-adjust-" + UUID.randomUUID());
+        assertEquals(5, snapshot.onHand());
+        assertEquals(2, snapshot.safetyBuffer());
+        assertEquals(3, snapshot.availableToSell());
+
+        var ledger = inventoryService.getLedgerBySku(fixture.sku(), 10);
+        assertEquals(1, ledger.size());
+        var entry = ledger.getFirst();
+        assertEquals("ADJUSTMENT", entry.operation());
+        assertEquals(0, entry.delta());
+        assertEquals(0, entry.safetyBufferBefore());
+        assertEquals(2, entry.safetyBufferAfter());
+        assertEquals(5, entry.onHandBefore());
+        assertEquals(5, entry.onHandAfter());
+        assertEquals("set safety buffer", entry.reason());
+
+        BusinessRuleException stale = assertThrows(BusinessRuleException.class,
+                () -> inventoryService.adjustInventory(new InventoryAdjustRequest(
+                                fixture.sku(), 1, "stale", snapshot.version() - 1),
+                        "buffer-stale-" + UUID.randomUUID()));
+        assertEquals("STALE_VERSION", stale.getErrorCode().getCode());
+
+        BusinessRuleException invariant = assertThrows(BusinessRuleException.class,
+                () -> inventoryService.adjustInventory(new InventoryAdjustRequest(
+                                fixture.sku(), -4, "strand buffer", null),
+                        "buffer-invariant-" + UUID.randomUUID()));
+        assertEquals("INVALID_STOCK_BALANCE", invariant.getErrorCode().getCode());
+
+        BusinessRuleException noChange = assertThrows(BusinessRuleException.class,
+                () -> inventoryService.adjustInventory(new InventoryAdjustRequest(
+                                fixture.sku(), 0, "no change", null, 2),
+                        "buffer-no-change-" + UUID.randomUUID()));
+        assertEquals("BAD_REQUEST", noChange.getErrorCode().getCode());
     }
 
     @Test
@@ -1111,6 +1589,25 @@ class FoundationPostgresIntegrationTest {
         return receiptService.receiveStock(receiptId, new ReceiveItemsRequest(List.of(
                         new ReceiveItemsRequest.ItemInspection(itemId, 1, 0))),
                 "receipt-race-" + UUID.randomUUID());
+    }
+
+    private ReceiptResponse receiveBatchAfterGate(Long receiptId, ReceiveItemsRequest request, String key,
+                                                  CountDownLatch ready, CountDownLatch start) throws Exception {
+        ready.countDown();
+        start.await();
+        return receiptService.receiveStock(receiptId, request, key);
+    }
+
+    private boolean tryReceiveAfterGate(Long receiptId, ReceiveItemsRequest request, String key,
+                                        CountDownLatch ready, CountDownLatch start) throws Exception {
+        ready.countDown();
+        start.await();
+        try {
+            receiptService.receiveStock(receiptId, request, key);
+            return true;
+        } catch (BusinessRuleException ex) {
+            return false;
+        }
     }
 
     private Long insertChannel() {

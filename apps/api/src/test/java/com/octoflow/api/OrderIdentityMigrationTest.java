@@ -42,6 +42,20 @@ class OrderIdentityMigrationTest {
                     ('LEGACY-POS', 'POS', 'PLACED', 'PENDING', 0, 'VND', 'forged-pos-id'),
                     ('LEGACY-SHOPIFY', 'SHOPIFY', 'PLACED', 'PENDING', 0, 'vnd', '  shopify-1  ')
                 """);
+        execute("legacy_ok", """
+                INSERT INTO products (id, name, status)
+                VALUES (1, 'Legacy product', 'PUBLISHED');
+                INSERT INTO product_variants (id, product_id, sku, title, price, currency)
+                VALUES (1, 1, 'LEGACY-SKU', 'Legacy variant', 100, 'VND');
+                INSERT INTO receipts (id, receipt_number, supplier_name, status)
+                VALUES (1, 'LEGACY-REC-1', 'Legacy supplier', 'RECEIVING'),
+                       (2, 'LEGACY-REC-2', 'Legacy supplier', 'COMPLETED'),
+                       (3, 'LEGACY-REC-3', 'Legacy supplier', 'DRAFT'),
+                       (4, 'LEGACY-REC-4', 'Legacy supplier', 'CANCELLED');
+                INSERT INTO receipt_items (receipt_id, variant_id, expected_qty, accepted_qty, rejected_qty, unit_cost)
+                VALUES (1, 1, 5, 2, 1, 100),
+                       (2, 1, 3, 3, 0, 100);
+                """);
 
         migrateLatest("legacy_ok");
 
@@ -59,6 +73,33 @@ class OrderIdentityMigrationTest {
                 SELECT COUNT(*) FROM pg_indexes
                 WHERE schemaname = 'legacy_ok' AND indexname = 'uq_orders_legacy_external_order'
                 """));
+
+        // V5 must remap legacy receipt statuses and snapshot catalog identity without losing the
+        // quantities or timestamps of rows created before Phase 02.
+        assertEquals("PARTIALLY_RECEIVED", queryString("legacy_ok",
+                "SELECT status FROM receipts WHERE receipt_number = 'LEGACY-REC-1'"));
+        assertEquals("RECEIVED", queryString("legacy_ok",
+                "SELECT status FROM receipts WHERE receipt_number = 'LEGACY-REC-2'"));
+        assertEquals("DRAFT", queryString("legacy_ok",
+                "SELECT status FROM receipts WHERE receipt_number = 'LEGACY-REC-3'"));
+        assertEquals("CANCELLED", queryString("legacy_ok",
+                "SELECT status FROM receipts WHERE receipt_number = 'LEGACY-REC-4'"));
+        assertEquals("Legacy CANCELLED status (pre-Phase 02)", queryString("legacy_ok",
+                "SELECT cancel_reason FROM receipts WHERE receipt_number = 'LEGACY-REC-4'"));
+        assertEquals(1, queryInt("legacy_ok",
+                "SELECT COUNT(*) FROM receipts WHERE receipt_number = 'LEGACY-REC-4' AND cancelled_at IS NOT NULL"));
+        assertEquals(0, queryInt("legacy_ok",
+                "SELECT version FROM receipts WHERE receipt_number = 'LEGACY-REC-1'"));
+        assertEquals(2, queryInt("legacy_ok",
+                "SELECT accepted_qty FROM receipt_items WHERE receipt_id = 1"));
+        assertEquals(1, queryInt("legacy_ok",
+                "SELECT rejected_qty FROM receipt_items WHERE receipt_id = 1"));
+        assertEquals("LEGACY-SKU", queryString("legacy_ok",
+                "SELECT sku FROM receipt_items WHERE receipt_id = 1"));
+        assertEquals("Legacy variant", queryString("legacy_ok",
+                "SELECT variant_title FROM receipt_items WHERE receipt_id = 1"));
+        assertEquals(3, queryInt("legacy_ok",
+                "SELECT accepted_qty FROM receipt_items WHERE receipt_id = 2"));
 
         migrateToV3("legacy_duplicate");
         execute("legacy_duplicate", """
