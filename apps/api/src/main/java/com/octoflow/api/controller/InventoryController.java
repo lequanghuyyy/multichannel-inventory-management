@@ -3,17 +3,17 @@ package com.octoflow.api.controller;
 import com.octoflow.api.dto.request.InventoryAdjustRequest;
 import com.octoflow.api.dto.response.InventorySnapshotResponse;
 import com.octoflow.api.dto.response.LedgerEntryResponse;
-import com.octoflow.api.middleware.IdempotencyFilter;
 import com.octoflow.api.service.InventoryService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.enums.ParameterIn;
 
 @RestController
 @RequestMapping("/api/v1/inventory")
@@ -55,8 +55,9 @@ public class InventoryController {
     @Operation(summary = "Adjust inventory with reason", description = "Admin-only manual balance adjustment with version concurrency control")
     public ResponseEntity<InventorySnapshotResponse> adjustInventory(
             @Valid @RequestBody InventoryAdjustRequest request,
-            HttpServletRequest httpRequest) {
-        String idempotencyKey = (String) httpRequest.getAttribute(IdempotencyFilter.IDEMPOTENCY_KEY_ATTR);
+            @Parameter(name = "Idempotency-Key", in = ParameterIn.HEADER, required = true,
+                    description = "Stable key reused for retries of this exact adjustment")
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
         InventorySnapshotResponse result = inventoryService.adjustInventory(request, idempotencyKey);
         return ResponseEntity.ok(result);
     }

@@ -3,17 +3,17 @@ package com.octoflow.api.controller;
 import com.octoflow.api.dto.request.ReserveStockRequest;
 import com.octoflow.api.dto.response.ApiResponse;
 import com.octoflow.api.dto.response.ReservationResponse;
-import com.octoflow.api.middleware.IdempotencyFilter;
 import com.octoflow.api.service.ReservationService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.enums.ParameterIn;
 
 @RestController
 @Tag(name = "Reservations", description = "Stock Hold, Sale Confirmation and Release Lifecycle")
@@ -44,8 +44,9 @@ public class ReservationController {
     @Operation(summary = "Hold stock for a transaction", description = "Increases reserved count without decreasing physical on-hand")
     public ResponseEntity<ReservationResponse> reserve(
             @Valid @RequestBody ReserveStockRequest request,
-            HttpServletRequest httpRequest) {
-        String idempotencyKey = (String) httpRequest.getAttribute(IdempotencyFilter.IDEMPOTENCY_KEY_ATTR);
+            @Parameter(name = "Idempotency-Key", in = ParameterIn.HEADER, required = true,
+                    description = "Stable key reused for retries of this exact reservation")
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
         ReservationResponse response = reservationService.reserve(request, idempotencyKey);
         return ResponseEntity.ok(response);
     }
@@ -55,8 +56,9 @@ public class ReservationController {
     @Operation(summary = "Confirm sale of held stock", description = "Decrements both on-hand and reserved simultaneously")
     public ResponseEntity<ApiResponse<Void>> confirmSale(
             @RequestParam Long reservationId,
-            HttpServletRequest httpRequest) {
-        String idempotencyKey = (String) httpRequest.getAttribute(IdempotencyFilter.IDEMPOTENCY_KEY_ATTR);
+            @Parameter(name = "Idempotency-Key", in = ParameterIn.HEADER, required = true,
+                    description = "Stable key reused for retries of this exact sale confirmation")
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
         reservationService.confirmSale(reservationId, idempotencyKey);
         return ResponseEntity.ok(ApiResponse.ok("Xác nhận bán hàng thành công", null));
     }

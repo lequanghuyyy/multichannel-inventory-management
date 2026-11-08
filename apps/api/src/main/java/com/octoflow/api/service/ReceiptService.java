@@ -12,7 +12,7 @@ public interface ReceiptService {
 
     ReceiptResponse getReceiptById(Long id);
 
-    ReceiptResponse createReceipt(CreateReceiptRequest request);
+    ReceiptResponse createReceipt(CreateReceiptRequest request, String idempotencyKey);
 
-    ReceiptResponse receiveStock(Long receiptId, ReceiveItemsRequest request);
+    ReceiptResponse receiveStock(Long receiptId, ReceiveItemsRequest request, String idempotencyKey);
 }

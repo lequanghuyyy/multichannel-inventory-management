@@ -23,7 +23,7 @@ public class ProductMapper {
         product.setName(request.name());
         product.setDescription(request.description());
         product.setCategory(request.category());
-        product.setStatus(Product.Status.PUBLISHED);
+        product.setStatus(Product.Status.DRAFT);
         return product;
     }
 

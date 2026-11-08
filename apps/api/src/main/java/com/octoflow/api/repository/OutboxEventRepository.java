@@ -11,6 +11,6 @@ import java.util.List;
 @Repository
 public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> {
 
-    @Query("SELECT e FROM OutboxEvent e WHERE e.status = 'PENDING' ORDER BY e.createdAt ASC")
+    @Query("SELECT e FROM OutboxEvent e WHERE e.status = 'PENDING' AND e.nextAttemptAt <= CURRENT_TIMESTAMP ORDER BY e.nextAttemptAt ASC, e.createdAt ASC")
     List<OutboxEvent> findPendingEvents(Pageable pageable);
 }
