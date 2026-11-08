@@ -41,11 +41,14 @@ public class AuthController {
                 new UsernamePasswordAuthenticationToken(principal, request.password())
         );
 
+        HttpSession session = httpRequest.getSession(true);
+        // Authentication is performed manually, so explicitly rotate the pre-authentication ID.
+        httpRequest.changeSessionId();
+
         SecurityContext sc = SecurityContextHolder.createEmptyContext();
         sc.setAuthentication(auth);
         SecurityContextHolder.setContext(sc);
 
-        HttpSession session = httpRequest.getSession(true);
         session.setAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY, sc);
 
         String role = auth.getAuthorities().stream()

@@ -46,7 +46,12 @@ public class ChannelController {
 
     @PostMapping("/{channelId}/inventory/{listingId}/reconcile")
     @PreAuthorize("hasRole('ADMIN')")
-    @Operation(summary = "Reconcile out-of-sync listing balance")
+    @Operation(summary = "Reconciliation requires a verified channel connector",
+            description = "Returns 503 until a connector can send the update and verify the channel read-back.")
+    @io.swagger.v3.oas.annotations.responses.ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "503", description = "Channel delivery and verification are unavailable")
+    })
     public ResponseEntity<ApiResponse<Void>> reconcileListing(
             @PathVariable Long channelId,
             @PathVariable Long listingId) {

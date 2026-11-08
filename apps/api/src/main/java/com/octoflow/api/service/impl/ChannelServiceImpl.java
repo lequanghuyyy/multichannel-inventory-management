@@ -4,6 +4,7 @@ import com.octoflow.api.dto.response.ChannelListingResponse;
 import com.octoflow.api.dto.response.ChannelResponse;
 import com.octoflow.api.entity.Channel;
 import com.octoflow.api.entity.ChannelListing;
+import com.octoflow.api.exception.ApiException;
 import com.octoflow.api.exception.ErrorCode;
 import com.octoflow.api.exception.ResourceNotFoundException;
 import com.octoflow.api.mapper.ChannelMapper;
@@ -11,6 +12,7 @@ import com.octoflow.api.repository.ChannelListingRepository;
 import com.octoflow.api.repository.ChannelRepository;
 import com.octoflow.api.service.ChannelService;
 import org.springframework.stereotype.Service;
+import org.springframework.http.HttpStatus;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
@@ -54,11 +56,14 @@ public class ChannelServiceImpl implements ChannelService {
     @Override
     @Transactional
     public void reconcileListing(Long channelId, Long listingId) {
-        ChannelListing listing = channelListingRepository.findById(listingId)
-                .orElseThrow(() -> new ResourceNotFoundException("Không tìm thấy liên kết sản phẩm #" + listingId));
-
-        listing.setSyncStatus(ChannelListing.SyncStatus.SYNCED);
-        listing.setReportedStock(listing.getAllocatedQuota());
-        channelListingRepository.save(listing);
+        if (!channelRepository.existsById(channelId)) {
+            throw new ResourceNotFoundException(ErrorCode.CHANNEL_NOT_FOUND, "Không tìm thấy kênh #" + channelId);
+        }
+        if (!channelListingRepository.existsById(listingId)) {
+            throw new ResourceNotFoundException(ErrorCode.MAPPING_NOT_FOUND,
+                    "Không tìm thấy liên kết sản phẩm #" + listingId);
+        }
+        throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE,
+                "Chưa có connector để gửi và xác minh thay đổi tồn trên kênh.");
     }
 }

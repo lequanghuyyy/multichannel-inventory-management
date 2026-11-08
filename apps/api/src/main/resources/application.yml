@@ -2,6 +2,12 @@ server:
   port: ${SERVER_PORT:8080}
   servlet:
     context-path: /
+    session:
+      timeout: ${SESSION_TIMEOUT:60m}
+      cookie:
+        http-only: true
+        secure: ${COOKIE_SECURE:true}
+        same-site: lax
   compression:
     enabled: true
     mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json
@@ -15,9 +21,9 @@ spring:
       enabled: true
 
   datasource:
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:octoflow}?sslmode=${DB_SSLMODE:disable}
-    username: ${DB_USER:octoflow}
-    password: ${DB_PASSWORD:octoflow_dev}
+    url: ${DB_URL}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
     driver-class-name: org.postgresql.Driver
     hikari:
       maximum-pool-size: ${DB_MAX_POOL_SIZE:10}
@@ -42,12 +48,17 @@ spring:
 
   flyway:
     enabled: true
-    baseline-on-migrate: true
+    baseline-on-migrate: false
     locations: classpath:db/migration
 
   security:
     csrf:
       enabled: true
+
+logging:
+  structured:
+    format:
+      console: logstash
 
 # SpringDoc OpenAPI configuration
 springdoc:
@@ -74,13 +85,12 @@ management:
 # OctoFlow Application Domain Configuration
 app:
   security:
-    cors-origins:
-      - "http://localhost:5173"
-      - "http://127.0.0.1:5173"
-      - "capacitor://localhost"
-      - "https://localhost"
-    session-timeout-minutes: 60
-    cookie-secure: ${COOKIE_SECURE:false}
+    cors-origins: ${CORS_ALLOWED_ORIGINS:}
+    cookie-secure: ${COOKIE_SECURE:true}
+
+  idempotency:
+    ttl: ${IDEMPOTENCY_TTL:PT24H}
+    cleanup-interval-ms: ${IDEMPOTENCY_CLEANUP_INTERVAL_MS:3600000}
 
   sync:
     mode: ${INVENTORY_SYNC_MODE:eda}
@@ -102,7 +112,7 @@ app:
       enabled: ${EBAY_ENABLED:false}
       environment: ${EBAY_ENVIRONMENT:sandbox}
     simulator:
-      enabled: ${ORDER_LOAD_ENABLED:true}
+      enabled: ${ORDER_LOAD_ENABLED:false}
 
   ai:
     forecast-url: ${AI_FORECAST_URL:http://127.0.0.1:8090}

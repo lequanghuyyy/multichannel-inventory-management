@@ -2,16 +2,21 @@ package com.octoflow.api.config;
 
 import com.octoflow.api.entity.*;
 import com.octoflow.api.repository.*;
+import com.octoflow.api.service.InventoryMovementRecorder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.List;
 
 @Configuration
+@Profile("dev")
 public class DataInitializer {
 
     private static final Logger log = LoggerFactory.getLogger(DataInitializer.class);
@@ -23,15 +28,19 @@ public class DataInitializer {
             ProductRepository productRepository,
             ProductVariantRepository variantRepository,
             InventoryBalanceRepository balanceRepository,
-            ChannelRepository channelRepository) {
-        return args -> {
+            ChannelRepository channelRepository,
+            InventoryMovementRecorder movementRecorder,
+            TransactionTemplate transactionTemplate,
+            @Value("${app.dev-seed.admin-password}") String adminPassword,
+            @Value("${app.dev-seed.staff-password}") String staffPassword) {
+        return args -> transactionTemplate.executeWithoutResult(status -> {
             if (userRepository.count() == 0) {
-                log.info("Khởi tạo tài khoản quản trị mặc định (admin@octoflow.dev)...");
+                log.info("Khởi tạo tài khoản quản trị development...");
 
                 User admin = new User();
                 admin.setUsername("admin");
                 admin.setEmail("admin@octoflow.dev");
-                admin.setPasswordHash(passwordEncoder.encode("Admin@123456"));
+                admin.setPasswordHash(passwordEncoder.encode(adminPassword));
                 admin.setRole(User.Role.ADMIN);
                 admin.setActive(true);
                 userRepository.save(admin);
@@ -39,12 +48,12 @@ public class DataInitializer {
                 User staff = new User();
                 staff.setUsername("staff");
                 staff.setEmail("staff@octoflow.dev");
-                staff.setPasswordHash(passwordEncoder.encode("Staff@123456"));
+                staff.setPasswordHash(passwordEncoder.encode(staffPassword));
                 staff.setRole(User.Role.STAFF);
                 staff.setActive(true);
                 userRepository.save(staff);
 
-                log.info("Đã tạo tài khoản admin (Admin@123456) và staff (Staff@123456)");
+                log.info("Đã tạo tài khoản admin và staff cho development profile.");
             }
 
             if (channelRepository.count() == 0) {
@@ -94,8 +103,10 @@ public class DataInitializer {
                 b1.setOnHand(50);
                 b1.setReserved(0);
                 b1.setSafetyBuffer(5);
-                b1.setVersion(0L);
                 balanceRepository.save(b1);
+                movementRecorder.record(savedV1.getId(), new InventoryMovementRecorder.Snapshot(
+                                0, 0, 0, 0, 0L), b1, "OPENING_BALANCE",
+                        "Development sample opening stock", "dev-seed:" + savedV1.getSku());
 
                 ProductVariant v2 = new ProductVariant();
                 v2.setProduct(savedP1);
@@ -110,11 +121,13 @@ public class DataInitializer {
                 b2.setOnHand(30);
                 b2.setReserved(0);
                 b2.setSafetyBuffer(3);
-                b2.setVersion(0L);
                 balanceRepository.save(b2);
+                movementRecorder.record(savedV2.getId(), new InventoryMovementRecorder.Snapshot(
+                                0, 0, 0, 0, 0L), b2, "OPENING_BALANCE",
+                        "Development sample opening stock", "dev-seed:" + savedV2.getSku());
 
                 log.info("Đã tạo sản phẩm và số dư tồn kho ban đầu thành công!");
             }
-        };
+        });
     }
 }
