@@ -41,3 +41,5 @@ Tạo sản phẩm, điều chỉnh tồn, giữ/bán hàng, đơn hàng và phi
 Đánh giá nền tảng Java và các quyết định của Phase 01: [docs/audits/phase-01-java-foundation-review.md](docs/audits/phase-01-java-foundation-review.md).
 
 Rà soát an toàn dữ liệu Phase 01.1 — order identity, contract POS-only, thứ tự khóa tồn kho, reservation/receiving: [docs/audits/phase-01.1-java-data-safety-review.md](docs/audits/phase-01.1-java-data-safety-review.md).
+
+Rà soát Phase 02 — vòng đời sản phẩm/SKU, tồn trung tâm và nhập hàng nhiều đợt: [docs/audits/phase-02-inventory-receiving-review.md](docs/audits/phase-02-inventory-receiving-review.md). Mỗi lần nhận hàng là một batch độc lập; chỉ số lượng được chấp nhận mới tăng tồn, batch chỉ có hàng lỗi vẫn được lưu audit nhưng không tạo ledger/outbox.
