@@ -1,0 +1,152 @@
+-- OctoFlow V1 Initial Database Schema Migration (PostgreSQL)
+
+CREATE TABLE IF NOT EXISTS users (
+    id BIGSERIAL PRIMARY KEY,
+    username VARCHAR(64) NOT NULL UNIQUE,
+    email VARCHAR(128) UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(32) NOT NULL DEFAULT 'STAFF',
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS products (
+    id BIGSERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    category VARCHAR(64),
+    status VARCHAR(32) NOT NULL DEFAULT 'DRAFT',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS product_variants (
+    id BIGSERIAL PRIMARY KEY,
+    product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    sku VARCHAR(64) NOT NULL UNIQUE,
+    title VARCHAR(128) NOT NULL,
+    price BIGINT NOT NULL DEFAULT 0,
+    currency VARCHAR(8) NOT NULL DEFAULT 'VND',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS inventory_balances (
+    variant_id BIGINT PRIMARY KEY REFERENCES product_variants(id) ON DELETE CASCADE,
+    on_hand INT NOT NULL DEFAULT 0 CHECK (on_hand >= 0),
+    reserved INT NOT NULL DEFAULT 0 CHECK (reserved >= 0),
+    safety_buffer INT NOT NULL DEFAULT 0 CHECK (safety_buffer >= 0),
+    version BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_reserved_and_buffer_lte_on_hand CHECK (reserved + safety_buffer <= on_hand)
+);
+
+CREATE TABLE IF NOT EXISTS inventory_ledger (
+    id BIGSERIAL PRIMARY KEY,
+    variant_id BIGINT NOT NULL REFERENCES product_variants(id) ON DELETE CASCADE,
+    delta INT NOT NULL,
+    reason VARCHAR(255) NOT NULL,
+    on_hand_after INT NOT NULL,
+    reserved_after INT NOT NULL,
+    reference_id VARCHAR(128),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS reservations (
+    id BIGSERIAL PRIMARY KEY,
+    variant_id BIGINT NOT NULL REFERENCES product_variants(id) ON DELETE CASCADE,
+    order_id BIGINT,
+    quantity INT NOT NULL CHECK (quantity > 0),
+    status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+    id BIGSERIAL PRIMARY KEY,
+    order_number VARCHAR(64) NOT NULL UNIQUE,
+    source VARCHAR(32) NOT NULL DEFAULT 'POS',
+    status VARCHAR(32) NOT NULL DEFAULT 'PLACED',
+    payment_status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+    total_amount BIGINT NOT NULL DEFAULT 0,
+    currency VARCHAR(8) NOT NULL DEFAULT 'VND',
+    external_order_id VARCHAR(128),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS order_items (
+    id BIGSERIAL PRIMARY KEY,
+    order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    variant_id BIGINT NOT NULL REFERENCES product_variants(id),
+    sku VARCHAR(64) NOT NULL,
+    quantity INT NOT NULL CHECK (quantity > 0),
+    unit_price BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS receipts (
+    id BIGSERIAL PRIMARY KEY,
+    receipt_number VARCHAR(64) NOT NULL UNIQUE,
+    supplier_name VARCHAR(255),
+    status VARCHAR(32) NOT NULL DEFAULT 'DRAFT',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS receipt_items (
+    id BIGSERIAL PRIMARY KEY,
+    receipt_id BIGINT NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
+    variant_id BIGINT NOT NULL REFERENCES product_variants(id),
+    expected_qty INT NOT NULL CHECK (expected_qty >= 0),
+    accepted_qty INT NOT NULL DEFAULT 0 CHECK (accepted_qty >= 0),
+    rejected_qty INT NOT NULL DEFAULT 0 CHECK (rejected_qty >= 0),
+    unit_cost BIGINT DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS channels (
+    id BIGSERIAL PRIMARY KEY,
+    code VARCHAR(64) NOT NULL UNIQUE,
+    name VARCHAR(128) NOT NULL,
+    environment VARCHAR(32) NOT NULL DEFAULT 'sandbox',
+    status VARCHAR(32) NOT NULL DEFAULT 'DISCONNECTED',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS channel_listings (
+    id BIGSERIAL PRIMARY KEY,
+    channel_id BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    variant_id BIGINT NOT NULL REFERENCES product_variants(id) ON DELETE CASCADE,
+    external_listing_id VARCHAR(128) NOT NULL,
+    external_sku VARCHAR(64),
+    allocated_quota INT NOT NULL DEFAULT 0,
+    reported_stock INT NOT NULL DEFAULT 0,
+    sync_status VARCHAR(32) NOT NULL DEFAULT 'UNVERIFIED',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_channel_variant UNIQUE (channel_id, variant_id)
+);
+
+CREATE TABLE IF NOT EXISTS outbox_events (
+    id BIGSERIAL PRIMARY KEY,
+    aggregate_type VARCHAR(64) NOT NULL,
+    aggregate_id VARCHAR(64) NOT NULL,
+    event_type VARCHAR(64) NOT NULL,
+    payload TEXT NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+    retry_count INT NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox_events(status, created_at) WHERE status = 'PENDING';
+CREATE INDEX IF NOT EXISTS idx_variant_sku ON product_variants(sku);
+CREATE INDEX IF NOT EXISTS idx_reservation_active_expiry ON reservations(status, expires_at) WHERE status = 'ACTIVE';

@@ -8,6 +8,8 @@ node_modules/
 dist/
 coverage/
 bin/
+target/
+*.iml
 *.tsbuildinfo
 
 # Operating System & IDE
