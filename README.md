@@ -24,3 +24,18 @@ Hồ sơ bàn giao nghiệp vụ và đặc tả yêu cầu phần mềm chi ti�
 | [04 — Danh mục chức năng](docs/04-danh-muc-chuc-nang.md) | Ma trận năng lực và hiện trạng triển khai theo từng phân hệ. |
 | [05 — Nghiệm thu và việc còn lại](docs/05-nghiem-thu-va-viec-con-lai.md) | Bộ kịch bản kiểm thử nghiệm thu (AC-01..16) và các khoảng trống cần hoàn tất. |
 | [06 — Thuật ngữ và quyết định](docs/06-thuat-ngu-va-quyet-dinh.md) | Từ điển nghiệp vụ và các quyết định chiến lược cần chốt. |
+
+## Chạy Backend Java ở môi trường local
+
+Backend không tự chọn tài khoản, mật khẩu cơ sở dữ liệu hoặc cấu hình CORS cho môi trường mặc định. Khi chạy local, bật profile `dev`; profile này cung cấp cấu hình PostgreSQL local và chỉ trong profile này mới tạo tài khoản/dữ liệu mẫu. Có thể ghi đè mật khẩu mẫu bằng `DEV_ADMIN_PASSWORD` và `DEV_STAFF_PASSWORD`.
+
+```bash
+export SPRING_PROFILES_ACTIVE=dev
+mvn -f apps/api/pom.xml spring-boot:run
+```
+
+Mặc định local dùng database `octoflow` trên `localhost:5432` với user `octoflow`. Production phải cung cấp `DB_URL`, `DB_USER`, `DB_PASSWORD`, `COOKIE_SECURE=true` và `CORS_ALLOWED_ORIGINS` phù hợp; không bật profile `dev`.
+
+Tạo sản phẩm, điều chỉnh tồn, giữ/bán hàng, đơn hàng và phiếu nhập cần `Idempotency-Key`. Tạo sản phẩm luôn bắt đầu ở trạng thái nháp với tồn bằng 0; nhập tồn sau đó qua phiếu nhập hoặc điều chỉnh có lý do. Kết quả idempotency được giữ 24 giờ mặc định; thời hạn có thể cấu hình bằng `IDEMPOTENCY_TTL`.
+
+Đánh giá nền tảng Java và các quyết định của Phase 01: [docs/audits/phase-01-java-foundation-review.md](docs/audits/phase-01-java-foundation-review.md).

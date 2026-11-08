@@ -2,17 +2,17 @@ package com.octoflow.api.controller;
 
 import com.octoflow.api.dto.request.CreateOrderRequest;
 import com.octoflow.api.dto.response.OrderResponse;
-import com.octoflow.api.middleware.IdempotencyFilter;
 import com.octoflow.api.service.OrderService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.enums.ParameterIn;
 
 @RestController
 @RequestMapping("/api/v1/orders")
@@ -44,16 +44,21 @@ public class OrderController {
     @Operation(summary = "Create a new order (POS or marketplace)")
     public ResponseEntity<OrderResponse> createOrder(
             @Valid @RequestBody CreateOrderRequest request,
-            HttpServletRequest httpRequest) {
-        String idempotencyKey = (String) httpRequest.getAttribute(IdempotencyFilter.IDEMPOTENCY_KEY_ATTR);
+            @Parameter(name = "Idempotency-Key", in = ParameterIn.HEADER, required = true,
+                    description = "Stable key reused for retries of this exact order request")
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
         return ResponseEntity.ok(orderService.createOrder(request, idempotencyKey));
     }
 
     @PostMapping("/{id}/payment/confirm")
     @PreAuthorize("hasAnyRole('ADMIN', 'STAFF')")
     @Operation(summary = "Confirm payment and finalize stock deduction")
-    public ResponseEntity<OrderResponse> confirmPayment(@PathVariable Long id) {
-        return ResponseEntity.ok(orderService.confirmPayment(id));
+    public ResponseEntity<OrderResponse> confirmPayment(
+            @PathVariable Long id,
+            @Parameter(name = "Idempotency-Key", in = ParameterIn.HEADER, required = true,
+                    description = "Stable key reused for retries of this payment confirmation")
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        return ResponseEntity.ok(orderService.confirmPayment(id, idempotencyKey));
     }
 
     @PostMapping("/{id}/ship")

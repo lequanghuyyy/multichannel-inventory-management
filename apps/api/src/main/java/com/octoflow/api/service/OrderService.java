@@ -13,7 +13,7 @@ public interface OrderService {
 
     OrderResponse createOrder(CreateOrderRequest request, String idempotencyKey);
 
-    OrderResponse confirmPayment(Long orderId);
+    OrderResponse confirmPayment(Long orderId, String idempotencyKey);
 
     OrderResponse shipOrder(Long orderId);
 }

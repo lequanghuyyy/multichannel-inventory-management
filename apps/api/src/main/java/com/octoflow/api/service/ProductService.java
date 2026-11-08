@@ -12,7 +12,7 @@ public interface ProductService {
 
     ProductResponse getProductById(Long id);
 
-    ProductResponse createProduct(CreateProductRequest request);
+    ProductResponse createProduct(CreateProductRequest request, String idempotencyKey);
 
     ProductResponse updateProduct(Long id, UpdateProductRequest request);
 

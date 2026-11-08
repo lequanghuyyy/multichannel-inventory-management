@@ -10,6 +10,8 @@ import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.enums.ParameterIn;
 
 import java.util.List;
 
@@ -41,8 +43,12 @@ public class ReceiptController {
     @PostMapping
     @PreAuthorize("hasRole('ADMIN')")
     @Operation(summary = "Create draft inbound receipt")
-    public ResponseEntity<ReceiptResponse> createReceipt(@Valid @RequestBody CreateReceiptRequest request) {
-        return ResponseEntity.ok(receiptService.createReceipt(request));
+    public ResponseEntity<ReceiptResponse> createReceipt(
+            @Valid @RequestBody CreateReceiptRequest request,
+            @Parameter(name = "Idempotency-Key", in = ParameterIn.HEADER, required = true,
+                    description = "Stable key reused for retries of this exact receipt request")
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        return ResponseEntity.ok(receiptService.createReceipt(request, idempotencyKey));
     }
 
     @PostMapping("/{id}/receive")
@@ -50,7 +56,10 @@ public class ReceiptController {
     @Operation(summary = "Inspect and receive inbound stock into physical on-hand")
     public ResponseEntity<ReceiptResponse> receiveStock(
             @PathVariable Long id,
-            @Valid @RequestBody ReceiveItemsRequest request) {
-        return ResponseEntity.ok(receiptService.receiveStock(id, request));
+            @Valid @RequestBody ReceiveItemsRequest request,
+            @Parameter(name = "Idempotency-Key", in = ParameterIn.HEADER, required = true,
+                    description = "Stable key reused for retries of this exact receipt operation")
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        return ResponseEntity.ok(receiptService.receiveStock(id, request, idempotencyKey));
     }
 }

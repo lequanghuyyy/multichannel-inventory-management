@@ -23,8 +23,26 @@ public class InventoryLedger {
     @Column(name = "on_hand_after", nullable = false)
     private int onHandAfter;
 
+    @Column(name = "on_hand_before", nullable = false)
+    private int onHandBefore;
+
     @Column(name = "reserved_after", nullable = false)
     private int reservedAfter;
+
+    @Column(name = "reserved_before", nullable = false)
+    private int reservedBefore;
+
+    @Column(name = "safety_buffer_before")
+    private Integer safetyBufferBefore;
+
+    @Column(name = "safety_buffer_after")
+    private Integer safetyBufferAfter;
+
+    @Column(nullable = false, length = 32)
+    private String operation = "ADJUSTMENT";
+
+    @Column(name = "actor_name", nullable = false, length = 64)
+    private String actorName = "system";
 
     @Column(name = "reference_id", length = 128)
     private String referenceId;
@@ -72,6 +90,9 @@ public class InventoryLedger {
         this.onHandAfter = onHandAfter;
     }
 
+    public int getOnHandBefore() { return onHandBefore; }
+    public void setOnHandBefore(int onHandBefore) { this.onHandBefore = onHandBefore; }
+
     public int getReservedAfter() {
         return reservedAfter;
     }
@@ -79,6 +100,17 @@ public class InventoryLedger {
     public void setReservedAfter(int reservedAfter) {
         this.reservedAfter = reservedAfter;
     }
+
+    public int getReservedBefore() { return reservedBefore; }
+    public void setReservedBefore(int reservedBefore) { this.reservedBefore = reservedBefore; }
+    public Integer getSafetyBufferBefore() { return safetyBufferBefore; }
+    public void setSafetyBufferBefore(Integer safetyBufferBefore) { this.safetyBufferBefore = safetyBufferBefore; }
+    public Integer getSafetyBufferAfter() { return safetyBufferAfter; }
+    public void setSafetyBufferAfter(Integer safetyBufferAfter) { this.safetyBufferAfter = safetyBufferAfter; }
+    public String getOperation() { return operation; }
+    public void setOperation(String operation) { this.operation = operation; }
+    public String getActorName() { return actorName; }
+    public void setActorName(String actorName) { this.actorName = actorName; }
 
     public String getReferenceId() {
         return referenceId;

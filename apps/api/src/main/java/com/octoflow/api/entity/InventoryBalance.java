@@ -28,7 +28,10 @@ public class InventoryBalance extends BaseEntity {
     private Long version;
 
     public int getAvailableToSell() {
-        return Math.max(0, this.onHand - this.reserved - this.safetyBuffer);
+        if (onHand < 0 || reserved < 0 || safetyBuffer < 0 || reserved > onHand - safetyBuffer) {
+            throw new IllegalStateException("Inventory balance invariant violated for variant " + variantId);
+        }
+        return onHand - reserved - safetyBuffer;
     }
 
     public Long getVariantId() {

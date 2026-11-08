@@ -9,7 +9,11 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.validation.FieldError;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import jakarta.validation.ConstraintViolationException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -38,12 +42,36 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleValidationException(MethodArgumentNotValidException ex, HttpServletRequest request) {
         String requestId = getRequestId(request);
         String details = ex.getBindingResult().getFieldErrors().stream()
-                .map(FieldError::getDefaultMessage)
+                .map(error -> error.getField() + ": " + error.getDefaultMessage())
                 .collect(Collectors.joining("; "));
         log.warn("Validation error: {} (request_id={})", details, requestId);
         return ResponseEntity
                 .status(HttpStatus.BAD_REQUEST)
                 .body(ErrorResponse.of(ErrorCode.BAD_REQUEST.getCode(), details, requestId));
+    }
+
+    @ExceptionHandler({HttpMessageNotReadableException.class, ConstraintViolationException.class})
+    public ResponseEntity<ErrorResponse> handleMalformedRequest(Exception ex, HttpServletRequest request) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(ErrorResponse.of(ErrorCode.BAD_REQUEST.getCode(),
+                        "Request body hoặc tham số không hợp lệ.", getRequestId(request)));
+    }
+
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    public ResponseEntity<ErrorResponse> handleOptimisticLock(ObjectOptimisticLockingFailureException ex,
+                                                                HttpServletRequest request) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ErrorResponse.of(ErrorCode.CONCURRENT_MODIFICATION.getCode(),
+                        "Dữ liệu đã được cập nhật bởi yêu cầu khác; hãy tải lại rồi thử lại.", getRequestId(request)));
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<ErrorResponse> handleDataIntegrity(DataIntegrityViolationException ex,
+                                                               HttpServletRequest request) {
+        log.warn("Database constraint rejected request (request_id={})", getRequestId(request));
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(ErrorResponse.of(ErrorCode.DATA_INTEGRITY_VIOLATION.getCode(),
+                        "Thay đổi bị từ chối do ràng buộc dữ liệu.", getRequestId(request)));
     }
 
     @ExceptionHandler(AuthenticationException.class)

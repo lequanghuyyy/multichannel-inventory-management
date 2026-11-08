@@ -5,7 +5,6 @@ import com.octoflow.api.dto.response.InventorySnapshotResponse;
 import com.octoflow.api.dto.response.LedgerEntryResponse;
 import com.octoflow.api.entity.InventoryBalance;
 import com.octoflow.api.entity.InventoryLedger;
-import com.octoflow.api.entity.OutboxEvent;
 import com.octoflow.api.entity.ProductVariant;
 import com.octoflow.api.exception.BusinessRuleException;
 import com.octoflow.api.exception.ErrorCode;
@@ -13,9 +12,10 @@ import com.octoflow.api.exception.ResourceNotFoundException;
 import com.octoflow.api.mapper.InventoryMapper;
 import com.octoflow.api.repository.InventoryBalanceRepository;
 import com.octoflow.api.repository.InventoryLedgerRepository;
-import com.octoflow.api.repository.OutboxEventRepository;
 import com.octoflow.api.repository.ProductVariantRepository;
 import com.octoflow.api.service.InventoryService;
+import com.octoflow.api.service.IdempotencyService;
+import com.octoflow.api.service.InventoryMovementRecorder;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -28,20 +28,23 @@ public class InventoryServiceImpl implements InventoryService {
 
     private final InventoryBalanceRepository balanceRepository;
     private final ProductVariantRepository variantRepository;
-    private final OutboxEventRepository outboxEventRepository;
     private final InventoryLedgerRepository ledgerRepository;
     private final InventoryMapper inventoryMapper;
+    private final IdempotencyService idempotencyService;
+    private final InventoryMovementRecorder movementRecorder;
 
     public InventoryServiceImpl(InventoryBalanceRepository balanceRepository,
                                 ProductVariantRepository variantRepository,
-                                OutboxEventRepository outboxEventRepository,
                                 InventoryLedgerRepository ledgerRepository,
-                                InventoryMapper inventoryMapper) {
+                                InventoryMapper inventoryMapper,
+                                IdempotencyService idempotencyService,
+                                InventoryMovementRecorder movementRecorder) {
         this.balanceRepository = balanceRepository;
         this.variantRepository = variantRepository;
-        this.outboxEventRepository = outboxEventRepository;
         this.ledgerRepository = ledgerRepository;
         this.inventoryMapper = inventoryMapper;
+        this.idempotencyService = idempotencyService;
+        this.movementRecorder = movementRecorder;
     }
 
     @Override
@@ -66,25 +69,33 @@ public class InventoryServiceImpl implements InventoryService {
     @Override
     @Transactional
     public InventorySnapshotResponse adjustInventory(InventoryAdjustRequest request, String idempotencyKey) {
+        return idempotencyService.execute(idempotencyKey, "POST:/api/v1/inventory/adjust", request,
+                InventorySnapshotResponse.class, () -> applyAdjustment(request, idempotencyKey));
+    }
+
+    private InventorySnapshotResponse applyAdjustment(InventoryAdjustRequest request, String idempotencyKey) {
         ProductVariant variant = variantRepository.findBySku(request.sku())
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.SKU_NOT_FOUND, "Không tìm thấy SKU " + request.sku()));
 
-        // Pessimistic lock row to avoid concurrent adjustment overwrite
+        // Insert-if-absent followed by FOR UPDATE serializes the first adjustment as well.
+        balanceRepository.ensureBalanceExists(variant.getId());
         InventoryBalance balance = balanceRepository.findByVariantIdWithLock(variant.getId())
-                .orElseGet(() -> {
-                    InventoryBalance init = new InventoryBalance();
-                    init.setVariantId(variant.getId());
-                    init.setOnHand(0);
-                    init.setReserved(0);
-                    init.setSafetyBuffer(0);
-                    return init;
-                });
+                .orElseThrow(() -> new IllegalStateException("Inventory balance initialization failed"));
+        InventoryMovementRecorder.Snapshot before = InventoryMovementRecorder.Snapshot.from(balance);
 
         if (request.expectedVersion() != null && !request.expectedVersion().equals(balance.getVersion())) {
             throw new BusinessRuleException(ErrorCode.STALE_VERSION, "Số liệu tồn kho đã thay đổi từ lần xem trước. Hãy tải lại.");
         }
 
-        int newOnHand = balance.getOnHand() + request.delta();
+        if (request.delta() == 0) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "Điều chỉnh tồn phải thay đổi ít nhất một đơn vị.");
+        }
+        int newOnHand;
+        try {
+            newOnHand = Math.addExact(balance.getOnHand(), request.delta());
+        } catch (ArithmeticException ex) {
+            throw new BusinessRuleException(ErrorCode.INVALID_STOCK_BALANCE, "Số lượng tồn vượt giới hạn hỗ trợ.");
+        }
         if (newOnHand < 0) {
             throw new BusinessRuleException(ErrorCode.INVALID_STOCK_BALANCE, "Tồn vật lý không thể âm sau khi điều chỉnh.");
         }
@@ -94,24 +105,7 @@ public class InventoryServiceImpl implements InventoryService {
 
         balance.setOnHand(newOnHand);
         balanceRepository.save(balance);
-
-        // Record audit ledger entry
-        InventoryLedger ledger = new InventoryLedger();
-        ledger.setVariantId(variant.getId());
-        ledger.setDelta(request.delta());
-        ledger.setReason(request.reason());
-        ledger.setOnHandAfter(balance.getOnHand());
-        ledger.setReservedAfter(balance.getReserved());
-        ledger.setReferenceId(idempotencyKey);
-        ledgerRepository.save(ledger);
-
-        // Record outbox event for asynchronous channel reconciliation
-        OutboxEvent event = new OutboxEvent();
-        event.setAggregateType("INVENTORY");
-        event.setAggregateId(variant.getId().toString());
-        event.setEventType("INVENTORY_ADJUSTED");
-        event.setPayload(String.format("{\"sku\":\"%s\",\"delta\":%d,\"reason\":\"%s\"}", variant.getSku(), request.delta(), request.reason()));
-        outboxEventRepository.save(event);
+        movementRecorder.record(variant.getId(), before, balance, "ADJUSTMENT", request.reason(), idempotencyKey);
 
         return inventoryMapper.toSnapshotResponse(variant, balance);
     }
