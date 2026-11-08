@@ -13,6 +13,7 @@ public record OrderResponse(
         @JsonProperty("total_amount") Long totalAmount,
         @JsonProperty("currency") String currency,
         @JsonProperty("external_order_id") String externalOrderId,
+        @JsonProperty("channel_id") Long channelId,
         @JsonProperty("items") List<OrderItemResponse> items,
         @JsonProperty("created_at") Instant createdAt,
         @JsonProperty("updated_at") Instant updatedAt

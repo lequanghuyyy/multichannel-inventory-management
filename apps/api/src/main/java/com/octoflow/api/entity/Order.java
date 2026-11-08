@@ -36,6 +36,9 @@ public class Order extends BaseEntity {
     @Column(name = "external_order_id", length = 128)
     private String externalOrderId;
 
+    @Column(name = "channel_id")
+    private Long channelId;
+
     @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<OrderItem> items = new ArrayList<>();
 
@@ -113,6 +116,14 @@ public class Order extends BaseEntity {
 
     public void setExternalOrderId(String externalOrderId) {
         this.externalOrderId = externalOrderId;
+    }
+
+    public Long getChannelId() {
+        return channelId;
+    }
+
+    public void setChannelId(Long channelId) {
+        this.channelId = channelId;
     }
 
     public List<OrderItem> getItems() {

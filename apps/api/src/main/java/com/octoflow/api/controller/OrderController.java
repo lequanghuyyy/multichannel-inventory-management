@@ -41,7 +41,10 @@ public class OrderController {
 
     @PostMapping
     @PreAuthorize("hasAnyRole('ADMIN', 'STAFF')")
-    @Operation(summary = "Create a new order (POS or marketplace)")
+    @Operation(summary = "Create a POS order",
+            description = "POS-only contract. The server controls the source and unit prices; "
+                    + "marketplace orders must arrive through the internal connector boundary. "
+                    + "An optional unitPrice is an expected-price check, not an override.")
     public ResponseEntity<OrderResponse> createOrder(
             @Valid @RequestBody CreateOrderRequest request,
             @Parameter(name = "Idempotency-Key", in = ParameterIn.HEADER, required = true,

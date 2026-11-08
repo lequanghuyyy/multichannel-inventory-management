@@ -47,6 +47,7 @@ public class OrderMapper {
                 order.getTotalAmount() != null ? order.getTotalAmount() : 0L,
                 order.getCurrency() != null ? order.getCurrency() : "VND",
                 order.getExternalOrderId(),
+                order.getChannelId(),
                 toItemResponses(order.getItems()),
                 order.getCreatedAt(),
                 order.getUpdatedAt()
