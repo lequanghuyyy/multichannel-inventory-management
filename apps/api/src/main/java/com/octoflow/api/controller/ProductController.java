@@ -57,7 +57,7 @@ public class ProductController {
     @Operation(summary = "Update product details")
     public ResponseEntity<ProductResponse> updateProduct(
             @PathVariable Long id,
-            @RequestBody UpdateProductRequest request) {
+            @Valid @RequestBody UpdateProductRequest request) {
         return ResponseEntity.ok(productService.updateProduct(id, request));
     }
 
