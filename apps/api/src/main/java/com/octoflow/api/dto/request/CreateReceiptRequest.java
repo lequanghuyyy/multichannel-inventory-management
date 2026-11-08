@@ -17,10 +17,17 @@ public record CreateReceiptRequest(
         @Size(max = 255, message = "Tên nhà cung cấp không được vượt quá 255 ký tự")
         String supplierName,
 
+        @Size(max = 2000, message = "Ghi chú phiếu nhập không được vượt quá 2.000 ký tự")
+        String note,
+
         @NotEmpty(message = "Phiếu nhập phải có ít nhất một sản phẩm")
         @Size(max = 200, message = "Một phiếu nhập không được vượt quá 200 dòng")
         List<@Valid ReceiptItemRequest> items
 ) {
+    public CreateReceiptRequest(String supplierName, List<ReceiptItemRequest> items) {
+        this(supplierName, null, items);
+    }
+
     public record ReceiptItemRequest(
             @NotNull(message = "ID biến thể không được để trống")
             @Positive(message = "ID biến thể phải lớn hơn 0")
