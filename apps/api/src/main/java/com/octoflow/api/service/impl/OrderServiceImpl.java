@@ -53,6 +53,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -482,8 +483,19 @@ public class OrderServiceImpl implements OrderService {
         Order order = lockOrder(orderId);
         requirePosOrder(order);
 
+        PosPaymentDetail existingPayment = paymentRepository.findById(orderId).orElse(null);
         if (order.getPaymentStatus() == Order.PaymentStatus.PAID) {
-            return toResponse(order);
+            PaymentCommand requestedPayment = resolvePayment(order, request, false);
+            if (existingPayment == null
+                    || !paymentMatches(order, existingPayment, requestedPayment)) {
+                throw new ApiException(HttpStatus.CONFLICT, ErrorCode.PAYMENT_CONFLICT,
+                        "Đơn đã được thanh toán bằng một giao dịch khác; không thể ghi nhận thanh toán mới.");
+            }
+            return orderMapper.toResponse(order, existingPayment);
+        }
+        if (existingPayment != null) {
+            throw new ApiException(HttpStatus.CONFLICT, ErrorCode.PAYMENT_CONFLICT,
+                    "Đơn đã có bản ghi thanh toán nhưng trạng thái thanh toán không nhất quán; cần kiểm tra thủ công.");
         }
         if (order.getStatus() == Order.Status.CANCELLED) {
             throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,
@@ -499,7 +511,7 @@ public class OrderServiceImpl implements OrderService {
                     "Đơn đã hết hạn giữ hàng; không thể xác nhận thanh toán.");
         }
         requireBaseCurrency(order);
-        PaymentCommand payment = resolvePayment(order, request);
+        PaymentCommand payment = resolvePayment(order, request, true);
         requireSameQuantities(order, quantities);
 
         for (Map.Entry<Long, Long> entry : quantities.entrySet()) {
@@ -536,7 +548,7 @@ public class OrderServiceImpl implements OrderService {
         return orderMapper.toResponse(saved, detail);
     }
 
-    private PaymentCommand resolvePayment(Order order, RecordPaymentRequest request) {
+    private PaymentCommand resolvePayment(Order order, RecordPaymentRequest request, boolean enforceAmount) {
         long amountDue = order.getTotalAmount() == null ? 0L : order.getTotalAmount();
         if (amountDue < 0) {
             throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,
@@ -557,12 +569,18 @@ public class OrderServiceImpl implements OrderService {
                     throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
                             "Thanh toán CASH phải ghi nhận số tiền khách đưa.");
                 }
-                if (request.cashReceived() < amountDue) {
+                if (enforceAmount && request.cashReceived() < amountDue) {
                     throw new BusinessRuleException(ErrorCode.PAYMENT_UNDERPAID,
                             "Tiền khách đưa (" + request.cashReceived() + ") nhỏ hơn số tiền phải trả ("
                                     + amountDue + ").");
                 }
-                long change = request.cashReceived() - amountDue;
+                long change;
+                try {
+                    change = Math.subtractExact(request.cashReceived(), amountDue);
+                } catch (ArithmeticException ex) {
+                    throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                            "Số tiền thanh toán vượt giới hạn hỗ trợ.");
+                }
                 yield new PaymentCommand(PosPaymentDetail.Method.CASH, amountDue,
                         request.cashReceived(), change, reference, note);
             }
@@ -577,6 +595,16 @@ public class OrderServiceImpl implements OrderService {
             default -> throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
                     "Chỉ hỗ trợ phương thức thanh toán CASH hoặc BANK_TRANSFER.");
         };
+    }
+
+    private boolean paymentMatches(Order order, PosPaymentDetail existing, PaymentCommand requested) {
+        return Objects.equals(existing.getCurrency(), order.getCurrency())
+                && existing.getMethod() == requested.method()
+                && Objects.equals(existing.getAmountDue(), requested.amountDue())
+                && Objects.equals(existing.getCashReceived(), requested.cashReceived())
+                && Objects.equals(existing.getChangeAmount(), requested.changeAmount())
+                && Objects.equals(existing.getReference(), requested.reference())
+                && Objects.equals(existing.getNote(), requested.note());
     }
 
     private PosPaymentDetail persistPayment(Order order, PaymentCommand payment) {

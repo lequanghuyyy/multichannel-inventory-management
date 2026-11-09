@@ -2251,6 +2251,159 @@ class FoundationPostgresIntegrationTest {
         }
     }
 
+    @Test
+    void paidOrderRejectsDifferentPaymentContentWithoutSideEffects() {
+        Fixture fixture = fixture(6, 0, 0);
+        OrderResponse created = createPosOrder(fixture, 2);
+        RecordPaymentRequest cash = new RecordPaymentRequest("CASH", 2500L, null, "Khách đưa 2.500");
+        String cashKey = "f02-cash-" + UUID.randomUUID();
+        OrderResponse paid = orderService.confirmPayment(created.id(), cash, cashKey);
+        assertEquals("PAID", paid.paymentStatus());
+
+        int historyAfterPayment = historyCount(created.id());
+        long ledgerAfterPayment = ledgerCount(fixture);
+        int outboxAfterPayment = paymentOutboxCount(created.id());
+
+        // Same key + same payload is a pure replay.
+        assertEquals(paid, orderService.confirmPayment(created.id(), cash, cashKey));
+        // Different key + equivalent payload returns the recorded transaction.
+        OrderResponse equivalent = orderService.confirmPayment(created.id(), cash,
+                "f02-cash-equivalent-" + UUID.randomUUID());
+        assertEquals("CASH", equivalent.payment().method());
+        assertEquals(2500L, equivalent.payment().cashReceived());
+
+        String bankConflictKey = "f02-cash-bank-" + UUID.randomUUID();
+        String amountConflictKey = "f02-cash-amount-" + UUID.randomUUID();
+        String noteConflictKey = "f02-cash-note-" + UUID.randomUUID();
+        String legacyConflictKey = "f02-cash-legacy-" + UUID.randomUUID();
+
+        assertPaymentConflict(() -> orderService.confirmPayment(created.id(),
+                new RecordPaymentRequest("BANK_TRANSFER", null, "FT-DIFF", null), bankConflictKey));
+        assertPaymentConflict(() -> orderService.confirmPayment(created.id(),
+                new RecordPaymentRequest("CASH", 2600L, null, "Khách đưa 2.500"), amountConflictKey));
+        assertPaymentConflict(() -> orderService.confirmPayment(created.id(),
+                new RecordPaymentRequest("CASH", 2500L, null, "Ghi chú khác"), noteConflictKey));
+        assertPaymentConflict(() -> orderService.confirmPayment(created.id(), legacyConflictKey));
+
+        assertEquals(historyAfterPayment, historyCount(created.id()));
+        assertEquals(ledgerAfterPayment, ledgerCount(fixture));
+        assertEquals(outboxAfterPayment, paymentOutboxCount(created.id()));
+        assertEquals(0, balance(fixture).getReserved());
+        assertEquals(4, balance(fixture).getOnHand());
+        PosPaymentDetail stored = posPaymentDetailRepository.findById(created.id()).orElseThrow();
+        assertEquals(PosPaymentDetail.Method.CASH, stored.getMethod());
+        assertEquals(2500L, stored.getCashReceived());
+        assertEquals(0, idempotencyCount(bankConflictKey));
+        assertEquals(0, idempotencyCount(amountConflictKey));
+        assertEquals(0, idempotencyCount(noteConflictKey));
+        assertEquals(0, idempotencyCount(legacyConflictKey));
+
+        // BANK_TRANSFER -> CASH and a changed reference are both conflicts.
+        Fixture bankFixture = fixture(3, 0, 0);
+        OrderResponse bankOrder = createPosOrder(bankFixture, 1);
+        RecordPaymentRequest bank = new RecordPaymentRequest(
+                "BANK_TRANSFER", null, "FT-ORIGINAL", "bank note");
+        orderService.confirmPayment(bankOrder.id(), bank, "f02-bank-" + UUID.randomUUID());
+        assertPaymentConflict(() -> orderService.confirmPayment(bankOrder.id(),
+                new RecordPaymentRequest("CASH", 1000L, null, null),
+                "f02-bank-cash-" + UUID.randomUUID()));
+        assertPaymentConflict(() -> orderService.confirmPayment(bankOrder.id(),
+                new RecordPaymentRequest("BANK_TRANSFER", null, "FT-DIFFERENT", "bank note"),
+                "f02-bank-ref-" + UUID.randomUUID()));
+        OrderResponse bankReplay = orderService.confirmPayment(bankOrder.id(), bank,
+                "f02-bank-replay-" + UUID.randomUUID());
+        assertEquals("BANK_TRANSFER", bankReplay.payment().method());
+
+        // A legacy empty-body MANUAL payment cannot be overwritten or forged into CASH/BANK_TRANSFER.
+        Fixture manualFixture = fixture(2, 0, 0);
+        OrderResponse manualOrder = createPosOrder(manualFixture, 1);
+        OrderResponse manual = orderService.confirmPayment(manualOrder.id(),
+                "f02-manual-" + UUID.randomUUID());
+        assertEquals("MANUAL", manual.payment().method());
+        assertPaymentConflict(() -> orderService.confirmPayment(manualOrder.id(),
+                new RecordPaymentRequest("CASH", 1000L, null, null),
+                "f02-manual-cash-" + UUID.randomUUID()));
+        assertPaymentConflict(() -> orderService.confirmPayment(manualOrder.id(),
+                new RecordPaymentRequest("BANK_TRANSFER", null, "FT-1", null),
+                "f02-manual-bank-" + UUID.randomUUID()));
+        OrderResponse manualReplay = orderService.confirmPayment(manualOrder.id(),
+                "f02-manual-replay-" + UUID.randomUUID());
+        assertEquals("MANUAL", manualReplay.payment().method());
+    }
+
+    @Test
+    void concurrentDifferentPaymentContentsCommitExactlyOnePayment() throws Exception {
+        Fixture fixture = fixture(3, 0, 0);
+        OrderResponse created = createPosOrder(fixture, 2);
+
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<OrderResponse> cashFuture = pool.submit(() -> {
+                ready.countDown();
+                start.await();
+                try {
+                    return orderService.confirmPayment(created.id(),
+                            new RecordPaymentRequest("CASH", 2000L, null, "cash"),
+                            "f02-race-cash-" + UUID.randomUUID());
+                } catch (ApiException conflict) {
+                    return null;
+                }
+            });
+            Future<OrderResponse> bankFuture = pool.submit(() -> {
+                ready.countDown();
+                start.await();
+                try {
+                    return orderService.confirmPayment(created.id(),
+                            new RecordPaymentRequest("BANK_TRANSFER", null, "FT-RACE", "bank"),
+                            "f02-race-bank-" + UUID.randomUUID());
+                } catch (ApiException conflict) {
+                    return null;
+                }
+            });
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            start.countDown();
+
+            OrderResponse cashResult = cashFuture.get(15, TimeUnit.SECONDS);
+            OrderResponse bankResult = bankFuture.get(15, TimeUnit.SECONDS);
+            assertTrue((cashResult == null) ^ (bankResult == null));
+
+            PosPaymentDetail stored = posPaymentDetailRepository.findById(created.id()).orElseThrow();
+            assertEquals(cashResult != null ? PosPaymentDetail.Method.CASH
+                    : PosPaymentDetail.Method.BANK_TRANSFER, stored.getMethod());
+            assertEquals(1, balance(fixture).getOnHand());
+            assertEquals(0, balance(fixture).getReserved());
+            assertEquals(2, ledgerCount(fixture));
+            assertEquals(1, jdbcTemplate.queryForObject("""
+                    SELECT COUNT(*) FROM order_status_history
+                    WHERE order_id = ? AND action = 'PAYMENT_CONFIRMED'
+                    """, Integer.class, created.id()));
+            assertEquals(1, paymentOutboxCount(created.id()));
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    private void assertPaymentConflict(Executable call) {
+        ApiException conflict = assertThrows(ApiException.class, call);
+        assertEquals(409, conflict.getStatus().value());
+        assertEquals("PAYMENT_CONFLICT", conflict.getErrorCode().getCode());
+    }
+
+    private int paymentOutboxCount(Long orderId) {
+        return jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM outbox_events
+                WHERE aggregate_type = 'ORDER' AND aggregate_id = ? AND event_type = 'ORDER_PAYMENT_RECORDED'
+                """, Integer.class, orderId.toString());
+    }
+
+    private int idempotencyCount(String key) {
+        return jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM idempotency_records WHERE idempotency_key = ?",
+                Integer.class, key);
+    }
+
     /**
      * Waits until another backend is blocked on the transaction that holds the product row lock.
      * PostgreSQL row locks are implemented as tuple locks, so a waiter appears as an ungranted
