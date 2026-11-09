@@ -69,8 +69,24 @@ public class ReceiptMapper {
                 event.getReceiptVersion(),
                 event.getActor(),
                 event.getNote(),
+                event.getPayload(),
                 event.getCreatedAt(),
                 items
+        );
+    }
+
+    public ReceiptResponse.ReceiptEventResponse toEventResponse(ReceiptEvent event) {
+        if (event == null) {
+            return null;
+        }
+        return new ReceiptResponse.ReceiptEventResponse(
+                event.getId(),
+                event.getEventType(),
+                event.getReceiptVersion(),
+                event.getActor(),
+                event.getNote(),
+                event.getPayload(),
+                event.getCreatedAt()
         );
     }
 
@@ -91,6 +107,12 @@ public class ReceiptMapper {
                         .map(this::toBatchResponse)
                         .collect(Collectors.toList());
 
+        List<ReceiptResponse.ReceiptEventResponse> events = receipt.getEvents() == null
+                ? Collections.emptyList()
+                : receipt.getEvents().stream()
+                        .map(this::toEventResponse)
+                        .collect(Collectors.toList());
+
         return new ReceiptResponse(
                 receipt.getId(),
                 receipt.getReceiptNumber(),
@@ -100,6 +122,7 @@ public class ReceiptMapper {
                 receipt.getVersion(),
                 toItemResponses(receiptItems),
                 batches,
+                events,
                 acceptedTotal,
                 rejectedTotal,
                 remainingTotal,

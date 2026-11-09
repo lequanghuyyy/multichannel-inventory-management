@@ -5,9 +5,11 @@ import com.octoflow.api.dto.request.CreateProductRequest;
 import com.octoflow.api.dto.request.UpdateProductRequest;
 import com.octoflow.api.dto.request.UpdateProductVariantRequest;
 import com.octoflow.api.dto.response.ProductResponse;
+import com.octoflow.api.entity.ChannelListing;
 import com.octoflow.api.entity.InventoryBalance;
 import com.octoflow.api.entity.Product;
 import com.octoflow.api.entity.ProductVariant;
+import com.octoflow.api.entity.VariantUpdateAudit;
 import com.octoflow.api.exception.ApiException;
 import com.octoflow.api.exception.BusinessRuleException;
 import com.octoflow.api.exception.ErrorCode;
@@ -21,11 +23,16 @@ import com.octoflow.api.repository.ProductRepository;
 import com.octoflow.api.repository.ProductVariantRepository;
 import com.octoflow.api.repository.ReceiptRepository;
 import com.octoflow.api.repository.ReservationRepository;
+import com.octoflow.api.repository.VariantUpdateAuditRepository;
 import com.octoflow.api.service.IdempotencyService;
 import com.octoflow.api.service.ProductService;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.time.Instant;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -62,6 +69,7 @@ public class ProductServiceImpl implements ProductService {
     private final OrderRepository orderRepository;
     private final ChannelListingRepository channelListingRepository;
     private final ReceiptRepository receiptRepository;
+    private final VariantUpdateAuditRepository variantUpdateAuditRepository;
     private final ProductMapper productMapper;
     private final IdempotencyService idempotencyService;
 
@@ -73,6 +81,7 @@ public class ProductServiceImpl implements ProductService {
                               OrderRepository orderRepository,
                               ChannelListingRepository channelListingRepository,
                               ReceiptRepository receiptRepository,
+                              VariantUpdateAuditRepository variantUpdateAuditRepository,
                               ProductMapper productMapper,
                               IdempotencyService idempotencyService) {
         this.productRepository = productRepository;
@@ -83,6 +92,7 @@ public class ProductServiceImpl implements ProductService {
         this.orderRepository = orderRepository;
         this.channelListingRepository = channelListingRepository;
         this.receiptRepository = receiptRepository;
+        this.variantUpdateAuditRepository = variantUpdateAuditRepository;
         this.productMapper = productMapper;
         this.idempotencyService = idempotencyService;
     }
@@ -284,16 +294,19 @@ public class ProductServiceImpl implements ProductService {
     public ProductResponse.VariantResponse updateVariant(Long productId,
                                                          Long variantId,
                                                          UpdateProductVariantRequest request) {
+        Product product = productRepository.findByIdForUpdate(productId)
+                .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.PRODUCT_NOT_FOUND,
+                        "Không tìm thấy sản phẩm #" + productId));
+        if (product.getStatus() == Product.Status.ARCHIVED) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                    "Không thể cập nhật biến thể của sản phẩm đã ARCHIVED.");
+        }
         ProductVariant variant = variantRepository.findByIdForUpdate(variantId)
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.VARIANT_NOT_FOUND,
                         "Không tìm thấy biến thể #" + variantId));
         if (!variant.getProduct().getId().equals(productId)) {
             throw new ResourceNotFoundException(ErrorCode.VARIANT_NOT_FOUND,
                     "Biến thể #" + variantId + " không thuộc sản phẩm #" + productId);
-        }
-        if (variant.getProduct().getStatus() == Product.Status.ARCHIVED) {
-            throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
-                    "Không thể cập nhật biến thể của sản phẩm đã ARCHIVED.");
         }
         if (request == null) {
             throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "Yêu cầu cập nhật biến thể không hợp lệ.");
@@ -310,7 +323,23 @@ public class ProductServiceImpl implements ProductService {
                 if (variantRepository.existsBySku(sku)) {
                     throw new BusinessRuleException(ErrorCode.DUPLICATE_SKU, "SKU '" + sku + "' đã tồn tại");
                 }
+                String oldSku = variant.getSku();
                 variant.setSku(sku);
+
+                VariantUpdateAudit audit = new VariantUpdateAudit();
+                audit.setVariantId(variant.getId());
+                audit.setFromSku(oldSku);
+                audit.setToSku(sku);
+                audit.setReason(reason);
+                audit.setActor(currentActor());
+                audit.setChangedAt(Instant.now());
+                variantUpdateAuditRepository.save(audit);
+
+                List<ChannelListing> listings = channelListingRepository.findByVariantId(variant.getId());
+                for (ChannelListing listing : listings) {
+                    listing.setSyncStatus(ChannelListing.SyncStatus.OUT_OF_SYNC);
+                }
+                channelListingRepository.saveAll(listings);
             }
         }
         if (request.title() != null) {
@@ -342,7 +371,8 @@ public class ProductServiceImpl implements ProductService {
                     || reservationRepository.existsByVariantIdIn(variantIds)
                     || orderRepository.existsByVariantIdIn(variantIds)
                     || channelListingRepository.existsByVariantIdIn(variantIds)
-                    || receiptRepository.existsItemByVariantIdIn(variantIds);
+                    || receiptRepository.existsItemByVariantIdIn(variantIds)
+                    || variantUpdateAuditRepository.existsByVariantIdIn(variantIds);
             if (hasHistory) {
                 throw new ApiException(HttpStatus.CONFLICT,
                         ErrorCode.PRODUCT_HAS_INVENTORY_HISTORY,
@@ -350,6 +380,16 @@ public class ProductServiceImpl implements ProductService {
             }
         }
         productRepository.delete(product);
+    }
+
+    private String currentActor() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null || !authentication.isAuthenticated()
+                || "anonymousUser".equals(authentication.getPrincipal())) {
+            return "system";
+        }
+        String name = authentication.getName();
+        return name.length() <= 64 ? name : name.substring(0, 64);
     }
 
     private String requireText(String value, int maxLength, String field) {

@@ -23,6 +23,8 @@ import com.octoflow.api.repository.ReceiptRepository;
 import com.octoflow.api.service.IdempotencyService;
 import com.octoflow.api.service.InventoryMovementRecorder;
 import com.octoflow.api.service.ReceiptService;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
@@ -32,11 +34,13 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @Service
@@ -52,19 +56,22 @@ public class ReceiptServiceImpl implements ReceiptService {
     private final ReceiptMapper receiptMapper;
     private final IdempotencyService idempotencyService;
     private final InventoryMovementRecorder movementRecorder;
+    private final ObjectMapper objectMapper;
 
     public ReceiptServiceImpl(ReceiptRepository receiptRepository,
                               InventoryBalanceRepository balanceRepository,
                               ProductVariantRepository variantRepository,
                               ReceiptMapper receiptMapper,
                               IdempotencyService idempotencyService,
-                              InventoryMovementRecorder movementRecorder) {
+                              InventoryMovementRecorder movementRecorder,
+                              ObjectMapper objectMapper) {
         this.receiptRepository = receiptRepository;
         this.balanceRepository = balanceRepository;
         this.variantRepository = variantRepository;
         this.receiptMapper = receiptMapper;
         this.idempotencyService = idempotencyService;
         this.movementRecorder = movementRecorder;
+        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -123,13 +130,75 @@ public class ReceiptServiceImpl implements ReceiptService {
         requireDraft(receipt, "chỉnh sửa");
         requireExpectedVersion(receipt, request.expectedVersion());
 
+        long versionBefore = receipt.getVersion() == null ? 0L : receipt.getVersion();
+        long versionAfter = nextVersion(receipt);
+        String supplierBefore = receipt.getSupplierName();
+        String noteBefore = receipt.getNote();
+
+        record ItemSnapshot(Long variantId, String sku, String variantTitle, int expectedQty, long unitCost) {}
+
+        List<ItemSnapshot> itemsBefore = receipt.getItems().stream()
+                .map(item -> new ItemSnapshot(item.getVariantId(), item.getSku(), item.getVariantTitle(),
+                        item.getExpectedQty(), item.getUnitCost()))
+                .toList();
+
         String supplierName = requireText(request.supplierName(), 255, "Tên nhà cung cấp");
         String note = optionalText(request.note(), 2000, "Ghi chú phiếu nhập");
+        List<ReceiptItem> desiredItems = buildItems(receipt, request.items());
+
+        List<ItemSnapshot> itemsAfter = desiredItems.stream()
+                .map(item -> new ItemSnapshot(item.getVariantId(), item.getSku(), item.getVariantTitle(),
+                        item.getExpectedQty(), item.getUnitCost()))
+                .toList();
+
+        Map<Long, ItemSnapshot> beforeMap = itemsBefore.stream()
+                .collect(Collectors.toMap(ItemSnapshot::variantId, Function.identity()));
+        Map<Long, ItemSnapshot> afterMap = itemsAfter.stream()
+                .collect(Collectors.toMap(ItemSnapshot::variantId, Function.identity()));
+
+        List<ItemSnapshot> addedItems = itemsAfter.stream()
+                .filter(item -> !beforeMap.containsKey(item.variantId()))
+                .toList();
+
+        List<ItemSnapshot> removedItems = itemsBefore.stream()
+                .filter(item -> !afterMap.containsKey(item.variantId()))
+                .toList();
+
+        record ItemDiff(Long variantId, String sku, String variantTitle,
+                        int fromExpectedQty, int toExpectedQty,
+                        long fromUnitCost, long toUnitCost) {}
+
+        List<ItemDiff> updatedItems = new ArrayList<>();
+        for (ItemSnapshot after : itemsAfter) {
+            ItemSnapshot before = beforeMap.get(after.variantId());
+            if (before != null && (before.expectedQty() != after.expectedQty() || before.unitCost() != after.unitCost())) {
+                updatedItems.add(new ItemDiff(after.variantId(), after.sku(), after.variantTitle(),
+                        before.expectedQty(), after.expectedQty(), before.unitCost(), after.unitCost()));
+            }
+        }
 
         receipt.setSupplierName(supplierName);
         receipt.setNote(note);
-        mergeItems(receipt, buildItems(receipt, request.items()));
-        appendEvent(receipt, ReceiptEvent.Type.UPDATED, nextVersion(receipt), "Cập nhật phiếu nháp");
+        mergeItems(receipt, desiredItems);
+
+        Map<String, Object> diffPayload = new LinkedHashMap<>();
+        diffPayload.put("actor", currentActor());
+        diffPayload.put("timestamp", Instant.now().toString());
+        diffPayload.put("version_before", versionBefore);
+        diffPayload.put("version_after", versionAfter);
+        diffPayload.put("supplier_name_before", supplierBefore);
+        diffPayload.put("supplier_name_after", supplierName);
+        diffPayload.put("note_before", noteBefore);
+        diffPayload.put("note_after", note);
+        diffPayload.put("items_before", itemsBefore);
+        diffPayload.put("items_after", itemsAfter);
+        diffPayload.put("added_items", addedItems);
+        diffPayload.put("updated_items", updatedItems);
+        diffPayload.put("removed_items", removedItems);
+
+        String payloadJson = serializePayload(diffPayload);
+        appendEvent(receipt, ReceiptEvent.Type.UPDATED, versionAfter,
+                "Cập nhật phiếu nháp (v" + versionBefore + " -> v" + versionAfter + ")", payloadJson);
 
         Receipt saved = receiptRepository.saveAndFlush(receipt);
         return receiptMapper.toResponse(saved);
@@ -188,8 +257,15 @@ public class ReceiptServiceImpl implements ReceiptService {
         receipt.setStatus(Receipt.Status.CLOSED_SHORT);
         receipt.setCloseShortReason(reason);
         receipt.setClosedShortAt(Instant.now());
-        appendEvent(receipt, ReceiptEvent.Type.CLOSED_SHORT, nextVersion(receipt),
-                reason + " (thiếu " + missing + ")");
+
+        Map<String, Object> closePayload = new LinkedHashMap<>();
+        closePayload.put("actor", currentActor());
+        closePayload.put("closed_short_at", receipt.getClosedShortAt().toString());
+        closePayload.put("missing_quantity", missing);
+        closePayload.put("reason", reason);
+
+        String payloadJson = serializePayload(closePayload);
+        appendEvent(receipt, ReceiptEvent.Type.CLOSED_SHORT, nextVersion(receipt), reason, payloadJson);
 
         Receipt saved = receiptRepository.saveAndFlush(receipt);
         return receiptMapper.toResponse(saved);
@@ -561,6 +637,10 @@ public class ReceiptServiceImpl implements ReceiptService {
     }
 
     private ReceiptEvent appendEvent(Receipt receipt, ReceiptEvent.Type type, long receiptVersion, String note) {
+        return appendEvent(receipt, type, receiptVersion, note, null);
+    }
+
+    private ReceiptEvent appendEvent(Receipt receipt, ReceiptEvent.Type type, long receiptVersion, String note, String payload) {
         receipt.setVersion(receiptVersion);
         ReceiptEvent event = new ReceiptEvent();
         event.setReceipt(receipt);
@@ -568,8 +648,20 @@ public class ReceiptServiceImpl implements ReceiptService {
         event.setReceiptVersion(receiptVersion);
         event.setActor(currentActor());
         event.setNote(note);
+        event.setPayload(payload);
         receipt.getEvents().add(event);
         return event;
+    }
+
+    private String serializePayload(Object payload) {
+        if (payload == null) {
+            return null;
+        }
+        try {
+            return objectMapper.writeValueAsString(payload);
+        } catch (JsonProcessingException ex) {
+            throw new BusinessRuleException(ErrorCode.INTERNAL_ERROR, "Không thể mã hóa dữ liệu audit.");
+        }
     }
 
     private Map<Long, ReceiptItem> itemsById(Receipt receipt) {

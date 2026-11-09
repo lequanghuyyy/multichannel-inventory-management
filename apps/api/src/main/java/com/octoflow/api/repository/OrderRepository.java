@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -53,9 +54,38 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     @Query(value = "SELECT pg_advisory_xact_lock(:key)", nativeQuery = true)
     void lockExternalOrderIdentity(@Param("key") long key);
 
+    /**
+     * Candidates for the abandoned-hold sweep. The database clock is used by the caller after
+     * locking, so this list is only a cheap pre-filter; the processor re-checks every condition.
+     */
+    @Query("""
+            SELECT o.id AS id FROM Order o
+            WHERE o.source = :source
+              AND o.status = :status
+              AND o.paymentStatus = :paymentStatus
+              AND o.holdExpiresAt IS NOT NULL
+              AND o.holdExpiresAt <= :now
+            ORDER BY o.id
+            """)
+    List<ExpiredOrderCandidate> findExpiredOrderCandidates(@Param("source") Order.Source source,
+                                                           @Param("status") Order.Status status,
+                                                           @Param("paymentStatus") Order.PaymentStatus paymentStatus,
+                                                           @Param("now") Instant now);
+
+    /**
+     * The database clock is read after inventory and order locks are held, so a transaction that
+     * waited on a lock does not decide expiry from a stale application clock.
+     */
+    @Query(value = "SELECT clock_timestamp()", nativeQuery = true)
+    java.sql.Timestamp databaseNow();
+
     interface VariantQuantity {
         Long getVariantId();
 
         Long getQuantity();
+    }
+
+    interface ExpiredOrderCandidate {
+        Long getId();
     }
 }

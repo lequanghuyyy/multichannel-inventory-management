@@ -13,6 +13,7 @@ public record ReceiptResponse(
         @JsonProperty("version") Long version,
         @JsonProperty("items") List<ReceiptItemResponse> items,
         @JsonProperty("batches") List<ReceiptBatchResponse> batches,
+        @JsonProperty("events") List<ReceiptEventResponse> events,
         @JsonProperty("accepted_total") int acceptedTotal,
         @JsonProperty("rejected_total") int rejectedTotal,
         @JsonProperty("remaining_total") int remainingTotal,
@@ -23,6 +24,30 @@ public record ReceiptResponse(
         @JsonProperty("created_at") Instant createdAt,
         @JsonProperty("updated_at") Instant updatedAt
 ) {
+    public ReceiptResponse(
+            Long id,
+            String receiptNumber,
+            String supplierName,
+            String note,
+            String status,
+            Long version,
+            List<ReceiptItemResponse> items,
+            List<ReceiptBatchResponse> batches,
+            int acceptedTotal,
+            int rejectedTotal,
+            int remainingTotal,
+            String cancelReason,
+            Instant cancelledAt,
+            String closeShortReason,
+            Instant closedShortAt,
+            Instant createdAt,
+            Instant updatedAt
+    ) {
+        this(id, receiptNumber, supplierName, note, status, version, items, batches, List.of(),
+                acceptedTotal, rejectedTotal, remainingTotal, cancelReason, cancelledAt,
+                closeShortReason, closedShortAt, createdAt, updatedAt);
+    }
+
     public record ReceiptItemResponse(
             @JsonProperty("id") Long id,
             @JsonProperty("variant_id") Long variantId,
@@ -43,8 +68,31 @@ public record ReceiptResponse(
             @JsonProperty("receipt_version") Long receiptVersion,
             @JsonProperty("actor") String actor,
             @JsonProperty("note") String note,
+            @JsonProperty("payload") String payload,
             @JsonProperty("received_at") Instant receivedAt,
             @JsonProperty("items") List<ReceiptBatchItemResponse> items
+    ) {
+        public ReceiptBatchResponse(
+                Long eventId,
+                String eventType,
+                Long receiptVersion,
+                String actor,
+                String note,
+                Instant receivedAt,
+                List<ReceiptBatchItemResponse> items
+        ) {
+            this(eventId, eventType, receiptVersion, actor, note, null, receivedAt, items);
+        }
+    }
+
+    public record ReceiptEventResponse(
+            @JsonProperty("id") Long id,
+            @JsonProperty("event_type") String eventType,
+            @JsonProperty("receipt_version") Long receiptVersion,
+            @JsonProperty("actor") String actor,
+            @JsonProperty("note") String note,
+            @JsonProperty("payload") String payload,
+            @JsonProperty("created_at") Instant createdAt
     ) {}
 
     public record ReceiptBatchItemResponse(

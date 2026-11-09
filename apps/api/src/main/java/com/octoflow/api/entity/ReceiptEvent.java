@@ -28,6 +28,9 @@ public class ReceiptEvent {
     @Column(length = 500)
     private String note;
 
+    @Column(columnDefinition = "TEXT")
+    private String payload;
+
     @Column(name = "receipt_version", nullable = false)
     private Long receiptVersion;
 
@@ -82,6 +85,14 @@ public class ReceiptEvent {
 
     public void setNote(String note) {
         this.note = note;
+    }
+
+    public String getPayload() {
+        return payload;
+    }
+
+    public void setPayload(String payload) {
+        this.payload = payload;
     }
 
     public Long getReceiptVersion() {

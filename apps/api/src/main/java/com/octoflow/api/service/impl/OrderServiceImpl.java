@@ -1,41 +1,54 @@
 package com.octoflow.api.service.impl;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.octoflow.api.dto.command.ChannelOrderCommand;
+import com.octoflow.api.dto.request.CancelOrderRequest;
 import com.octoflow.api.dto.request.CreateOrderRequest;
+import com.octoflow.api.dto.request.HandoverOrderRequest;
+import com.octoflow.api.dto.request.OrderTransitionRequest;
+import com.octoflow.api.dto.request.RecordPaymentRequest;
+import com.octoflow.api.dto.response.OrderHistoryResponse;
 import com.octoflow.api.dto.response.OrderResponse;
 import com.octoflow.api.entity.Channel;
 import com.octoflow.api.entity.InventoryBalance;
 import com.octoflow.api.entity.Order;
 import com.octoflow.api.entity.OrderItem;
-import com.octoflow.api.entity.OutboxEvent;
+import com.octoflow.api.entity.OrderStatusHistory;
+import com.octoflow.api.entity.PosPaymentDetail;
+import com.octoflow.api.entity.Product;
 import com.octoflow.api.entity.ProductVariant;
 import com.octoflow.api.exception.ApiException;
 import com.octoflow.api.exception.BusinessRuleException;
 import com.octoflow.api.exception.ErrorCode;
 import com.octoflow.api.exception.ResourceNotFoundException;
 import com.octoflow.api.mapper.OrderMapper;
-import com.octoflow.api.middleware.RequestIdFilter;
 import com.octoflow.api.repository.ChannelRepository;
 import com.octoflow.api.repository.InventoryBalanceRepository;
 import com.octoflow.api.repository.OrderRepository;
-import com.octoflow.api.repository.OutboxEventRepository;
+import com.octoflow.api.repository.OrderStatusHistoryRepository;
+import com.octoflow.api.repository.PosPaymentDetailRepository;
+import com.octoflow.api.repository.ProductRepository;
 import com.octoflow.api.repository.ProductVariantRepository;
 import com.octoflow.api.service.IdempotencyService;
 import com.octoflow.api.service.InventoryMovementRecorder;
+import com.octoflow.api.service.OrderAuditRecorder;
 import com.octoflow.api.service.OrderService;
-import org.slf4j.MDC;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -48,46 +61,70 @@ import java.util.regex.Pattern;
 @Service
 public class OrderServiceImpl implements OrderService {
 
+    private static final Logger log = LoggerFactory.getLogger(OrderServiceImpl.class);
     private static final int MAX_ORDER_LINES = 200;
     private static final int MAX_QUANTITY_PER_SKU = 1_000_000;
+    private static final int MAX_REASON_LENGTH = 500;
+    private static final int MAX_REFERENCE_LENGTH = 128;
     private static final String BASE_CURRENCY = "VND";
     private static final Pattern CURRENCY_PATTERN = Pattern.compile("^[A-Z]{3}$");
     private static final Pattern EXTERNAL_ORDER_ID_PATTERN = Pattern.compile("^[A-Za-z0-9._:/-]{1,128}$");
 
     private final OrderRepository orderRepository;
+    private final ProductRepository productRepository;
     private final ProductVariantRepository variantRepository;
     private final InventoryBalanceRepository balanceRepository;
-    private final OutboxEventRepository outboxEventRepository;
     private final ChannelRepository channelRepository;
+    private final OrderStatusHistoryRepository historyRepository;
+    private final PosPaymentDetailRepository paymentRepository;
     private final OrderMapper orderMapper;
     private final IdempotencyService idempotencyService;
     private final InventoryMovementRecorder movementRecorder;
-    private final ObjectMapper objectMapper;
+    private final OrderAuditRecorder auditRecorder;
+    private final OrderExpiryProcessor orderExpiryProcessor;
+    private final Duration holdTtl;
 
     public OrderServiceImpl(OrderRepository orderRepository,
+                            ProductRepository productRepository,
                             ProductVariantRepository variantRepository,
                             InventoryBalanceRepository balanceRepository,
-                            OutboxEventRepository outboxEventRepository,
                             ChannelRepository channelRepository,
+                            OrderStatusHistoryRepository historyRepository,
+                            PosPaymentDetailRepository paymentRepository,
                             OrderMapper orderMapper,
                             IdempotencyService idempotencyService,
                             InventoryMovementRecorder movementRecorder,
-                            ObjectMapper objectMapper) {
+                            OrderAuditRecorder auditRecorder,
+                            OrderExpiryProcessor orderExpiryProcessor,
+                            @Value("${app.orders.hold-ttl:PT15M}") Duration holdTtl) {
         this.orderRepository = orderRepository;
+        this.productRepository = productRepository;
         this.variantRepository = variantRepository;
         this.balanceRepository = balanceRepository;
-        this.outboxEventRepository = outboxEventRepository;
         this.channelRepository = channelRepository;
+        this.historyRepository = historyRepository;
+        this.paymentRepository = paymentRepository;
         this.orderMapper = orderMapper;
         this.idempotencyService = idempotencyService;
         this.movementRecorder = movementRecorder;
-        this.objectMapper = objectMapper;
+        this.auditRecorder = auditRecorder;
+        this.orderExpiryProcessor = orderExpiryProcessor;
+        this.holdTtl = holdTtl;
+        if (holdTtl == null || holdTtl.isZero() || holdTtl.isNegative()) {
+            throw new IllegalArgumentException("app.orders.hold-ttl must be a positive duration");
+        }
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<OrderResponse> listOrders() {
-        return orderMapper.toResponseList(orderRepository.findAll());
+        List<Order> orders = orderRepository.findAll();
+        Map<Long, PosPaymentDetail> payments = new HashMap<>();
+        if (!orders.isEmpty()) {
+            paymentRepository.findAllById(orders.stream().map(Order::getId).toList())
+                    .forEach(payment -> payments.put(payment.getOrderId(), payment));
+        }
+        return orderMapper.toResponseList(orders, payments);
     }
 
     @Override
@@ -95,7 +132,7 @@ public class OrderServiceImpl implements OrderService {
     public OrderResponse getOrderById(Long id) {
         Order order = orderRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.ORDER_NOT_FOUND, "Không tìm thấy đơn hàng #" + id));
-        return orderMapper.toResponse(order);
+        return toResponse(order);
     }
 
     @Override
@@ -114,8 +151,10 @@ public class OrderServiceImpl implements OrderService {
         ResolvedOrder resolved = resolveOrder(merged, BASE_CURRENCY);
 
         Order order = newOrder(Order.Source.POS, null, null, BASE_CURRENCY);
+        // POS holds use the order row itself because no per-line reservation row is created.
+        order.setHoldExpiresAt(orderRepository.databaseNow().toInstant().plus(holdTtl));
         reserveAndSave(order, resolved);
-        return orderMapper.toResponse(order);
+        return toResponse(order);
     }
 
     @Override
@@ -149,7 +188,7 @@ public class OrderServiceImpl implements OrderService {
                 throw new ApiException(HttpStatus.CONFLICT, ErrorCode.EXTERNAL_ORDER_CONFLICT,
                         "Đơn hàng bên ngoài đã tồn tại với nội dung khác; không ghi đè đơn đã lưu.");
             }
-            return orderMapper.toResponse(order);
+            return toResponse(order);
         }
 
         ResolvedOrder resolved = resolveOrder(mergeRequestedLines(
@@ -157,8 +196,9 @@ public class OrderServiceImpl implements OrderService {
                         .map(line -> new RequestedLine(line.sku(), line.quantity(), null))
                         .toList()), currency);
         Order order = newOrder(command.source(), channel.getId(), externalOrderId, currency);
+        // Marketplace orders are excluded from the POS hold-expiry sweep.
         reserveAndSave(order, resolved);
-        return orderMapper.toResponse(order);
+        return toResponse(order);
     }
 
     private void validatePosRequest(CreateOrderRequest request) {
@@ -288,6 +328,23 @@ public class OrderServiceImpl implements OrderService {
     }
 
     private void reserveAndSave(Order order, ResolvedOrder resolved) {
+        // Canonical lock hierarchy: Product (sorted product_id ASC) -> ProductVariant -> InventoryBalance (sorted variant_id ASC).
+        List<Long> productIds = resolved.lines().stream()
+                .map(line -> line.variant().getProduct().getId())
+                .distinct()
+                .sorted()
+                .toList();
+
+        for (Long productId : productIds) {
+            Product product = productRepository.findByIdForUpdate(productId)
+                    .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.PRODUCT_NOT_FOUND,
+                            "Không tìm thấy sản phẩm #" + productId));
+            if (product.getStatus() == Product.Status.ARCHIVED) {
+                throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                        "Không thể tạo đơn hàng cho sản phẩm đã ARCHIVED: " + product.getName());
+            }
+        }
+
         Map<Long, InventoryBalance> locked = new LinkedHashMap<>();
         for (ResolvedLine line : resolved.lines()) {
             InventoryBalance balance = balanceRepository.findByVariantIdWithLock(line.variant().getId())
@@ -335,13 +392,9 @@ public class OrderServiceImpl implements OrderService {
         order.setItems(items);
         Order saved = orderRepository.save(order);
 
-        OutboxEvent event = new OutboxEvent();
-        event.setAggregateType("ORDER");
-        event.setAggregateId(saved.getId().toString());
-        event.setEventType("ORDER_CREATED");
-        event.setCorrelationId(MDC.get(RequestIdFilter.MDC_KEY));
-        event.setPayload(serializeOrderCreated(saved));
-        outboxEventRepository.save(event);
+        auditRecorder.recordHistory(saved, OrderStatusHistory.Action.CREATED,
+                null, Order.Status.PLACED, null, Order.PaymentStatus.PENDING, null);
+        auditRecorder.recordOutbox(saved, "ORDER_CREATED", null, null);
     }
 
     private Order newOrder(Order.Source source, Long channelId, String externalOrderId, String currency) {
@@ -360,51 +413,50 @@ public class OrderServiceImpl implements OrderService {
     @Override
     @Transactional
     public OrderResponse confirmPayment(Long orderId, String idempotencyKey) {
-        return idempotencyService.execute(idempotencyKey, "POST:/api/v1/orders/" + orderId + "/payment/confirm",
-                Map.of("orderId", orderId), OrderResponse.class, () -> confirmPaymentInternal(orderId));
+        return confirmPayment(orderId, null, idempotencyKey);
     }
 
-    private OrderResponse confirmPaymentInternal(Long orderId) {
+    @Override
+    @Transactional
+    public OrderResponse confirmPayment(Long orderId, RecordPaymentRequest request, String idempotencyKey) {
+        return idempotencyService.execute(idempotencyKey,
+                "POST:/api/v1/orders/" + orderId + "/payment/confirm",
+                paymentFingerprint(orderId, request), OrderResponse.class,
+                () -> confirmPaymentInternal(orderId, request));
+    }
+
+    private OrderResponse confirmPaymentInternal(Long orderId, RecordPaymentRequest request) {
         // Resolve variant quantities without loading the managed Order first. Balances must be
         // locked in ascending variant_id order; loading the Order entity before the lock would
         // leave a stale PENDING copy in the persistence context while this transaction waits for
         // a concurrent confirmation, producing a double deduction attempt instead of an
         // idempotent PAID return.
-        Map<Long, Long> quantities = new TreeMap<>();
-        for (OrderRepository.VariantQuantity row : orderRepository.findVariantQuantitiesByOrderId(orderId)) {
-            if (row.getVariantId() == null || row.getQuantity() == null || row.getQuantity() <= 0) {
-                throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,
-                        "Đơn hàng có số lượng dòng không hợp lệ.");
-            }
-            quantities.put(row.getVariantId(), row.getQuantity());
-        }
-
-        Map<Long, InventoryBalance> balances = new LinkedHashMap<>();
-        for (Long variantId : quantities.keySet()) {
-            balances.put(variantId, balanceRepository.findByVariantIdWithLock(variantId)
-                    .orElseThrow(() -> new BusinessRuleException(ErrorCode.INVALID_STOCK_BALANCE,
-                            "Không tìm thấy số dư tồn kho cho variant #" + variantId)));
-        }
-
-        Order order = orderRepository.findByIdForUpdate(orderId)
-                .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.ORDER_NOT_FOUND,
-                        "Không tìm thấy đơn hàng #" + orderId));
+        Map<Long, Long> quantities = loadVariantQuantities(orderId);
+        Map<Long, InventoryBalance> balances = lockBalances(quantities);
+        Order order = lockOrder(orderId);
+        requirePosOrder(order);
 
         if (order.getPaymentStatus() == Order.PaymentStatus.PAID) {
-            return orderMapper.toResponse(order);
+            return toResponse(order);
         }
         if (order.getStatus() == Order.Status.CANCELLED) {
             throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,
                     "Không thể xác nhận thanh toán cho đơn đã hủy.");
         }
-
-        Map<Long, Long> lockedQuantities = aggregateOrderQuantities(order.getItems());
-        if (!lockedQuantities.equals(quantities)) {
+        if (order.getStatus() != Order.Status.PLACED) {
             throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,
-                    "Dòng đơn hàng đã thay đổi trong lúc xác nhận thanh toán; hãy thử lại.");
+                    "Chỉ đơn đang PLACED mới có thể xác nhận thanh toán.");
         }
+        if (order.getHoldExpiresAt() != null
+                && !order.getHoldExpiresAt().isAfter(orderRepository.databaseNow().toInstant())) {
+            throw new BusinessRuleException(ErrorCode.ORDER_HOLD_EXPIRED,
+                    "Đơn đã hết hạn giữ hàng; không thể xác nhận thanh toán.");
+        }
+        requireBaseCurrency(order);
+        PaymentCommand payment = resolvePayment(order, request);
+        requireSameQuantities(order, quantities);
 
-        for (Map.Entry<Long, Long> entry : lockedQuantities.entrySet()) {
+        for (Map.Entry<Long, Long> entry : quantities.entrySet()) {
             Long variantId = entry.getKey();
             long quantityLong = entry.getValue();
             if (quantityLong > Integer.MAX_VALUE) {
@@ -427,8 +479,284 @@ public class OrderServiceImpl implements OrderService {
 
         order.setPaymentStatus(Order.PaymentStatus.PAID);
         order.setStatus(Order.Status.CONFIRMED);
+        order.setHoldExpiresAt(null);
         Order saved = orderRepository.save(order);
-        return orderMapper.toResponse(saved);
+
+        PosPaymentDetail detail = persistPayment(saved, payment);
+        auditRecorder.recordHistory(saved, OrderStatusHistory.Action.PAYMENT_CONFIRMED,
+                Order.Status.PLACED, Order.Status.CONFIRMED,
+                Order.PaymentStatus.PENDING, Order.PaymentStatus.PAID, payment.note());
+        auditRecorder.recordOutbox(saved, "ORDER_PAYMENT_RECORDED", payment.note(), detail);
+        return orderMapper.toResponse(saved, detail);
+    }
+
+    private PaymentCommand resolvePayment(Order order, RecordPaymentRequest request) {
+        long amountDue = order.getTotalAmount() == null ? 0L : order.getTotalAmount();
+        if (amountDue < 0) {
+            throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,
+                    "Tổng tiền đơn hàng không hợp lệ.");
+        }
+        if (request == null) {
+            // Compatibility path for the legacy endpoint that had no request body.
+            return new PaymentCommand(PosPaymentDetail.Method.MANUAL, amountDue, null, null, null, null);
+        }
+
+        String method = normalizePaymentMethod(request.method());
+        String reference = normalizeOptionalText(request.reference(), MAX_REFERENCE_LENGTH, "Mã tham chiếu");
+        String note = normalizeOptionalText(request.note(), MAX_REASON_LENGTH, "Ghi chú");
+
+        return switch (method) {
+            case "CASH" -> {
+                if (request.cashReceived() == null) {
+                    throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                            "Thanh toán CASH phải ghi nhận số tiền khách đưa.");
+                }
+                if (request.cashReceived() < amountDue) {
+                    throw new BusinessRuleException(ErrorCode.PAYMENT_UNDERPAID,
+                            "Tiền khách đưa (" + request.cashReceived() + ") nhỏ hơn số tiền phải trả ("
+                                    + amountDue + ").");
+                }
+                long change = request.cashReceived() - amountDue;
+                yield new PaymentCommand(PosPaymentDetail.Method.CASH, amountDue,
+                        request.cashReceived(), change, reference, note);
+            }
+            case "BANK_TRANSFER" -> {
+                if (request.cashReceived() != null) {
+                    throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                            "Thanh toán BANK_TRANSFER không được gửi tiền mặt/tiền thừa.");
+                }
+                yield new PaymentCommand(PosPaymentDetail.Method.BANK_TRANSFER, amountDue,
+                        null, null, reference, note);
+            }
+            default -> throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                    "Chỉ hỗ trợ phương thức thanh toán CASH hoặc BANK_TRANSFER.");
+        };
+    }
+
+    private PosPaymentDetail persistPayment(Order order, PaymentCommand payment) {
+        PosPaymentDetail detail = new PosPaymentDetail();
+        detail.setOrderId(order.getId());
+        detail.setMethod(payment.method());
+        detail.setCurrency(order.getCurrency());
+        detail.setAmountDue(payment.amountDue());
+        detail.setCashReceived(payment.cashReceived());
+        detail.setChangeAmount(payment.changeAmount());
+        detail.setReference(payment.reference());
+        detail.setNote(payment.note());
+        detail.setActor(auditRecorder.currentActor());
+        detail.setPaidAt(orderRepository.databaseNow().toInstant());
+        return paymentRepository.save(detail);
+    }
+
+    @Override
+    @Transactional
+    public OrderResponse cancelOrder(Long orderId, CancelOrderRequest request, String idempotencyKey) {
+        String reason = requireReason(request == null ? null : request.reason());
+        return idempotencyService.execute(idempotencyKey,
+                "POST:/api/v1/orders/" + orderId + "/cancel",
+                new CancelIdempotencyRequest(orderId, reason), OrderResponse.class,
+                () -> cancelOrderInternal(orderId, reason));
+    }
+
+    private OrderResponse cancelOrderInternal(Long orderId, String reason) {
+        Map<Long, Long> quantities = loadVariantQuantities(orderId);
+        Map<Long, InventoryBalance> balances = lockBalances(quantities);
+        Order order = lockOrder(orderId);
+        requirePosOrder(order);
+
+        if (order.getStatus() == Order.Status.CANCELLED) {
+            // A retry (or an expiry that already won) must not release the hold a second time.
+            return toResponse(order);
+        }
+        if (order.getPaymentStatus() != Order.PaymentStatus.PENDING) {
+            throw new BusinessRuleException(ErrorCode.PAID_ORDER_CANCELLATION_BLOCKED,
+                    "Không thể hủy đơn đã thanh toán. Hoàn tiền/void sẽ được triển khai ở giai đoạn sau.");
+        }
+        if (order.getStatus() != Order.Status.PLACED) {
+            throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,
+                    "Chỉ đơn chưa thanh toán đang PLACED mới được hủy.");
+        }
+        requireSameQuantities(order, quantities);
+
+        releaseReservedOnly(order, quantities, balances, "ORDER_CANCELLED",
+                "Cancel order " + order.getOrderNumber() + ": " + reason);
+
+        order.setStatus(Order.Status.CANCELLED);
+        order.setHoldExpiresAt(null);
+        Order saved = orderRepository.save(order);
+
+        auditRecorder.recordHistory(saved, OrderStatusHistory.Action.CANCELLED,
+                Order.Status.PLACED, Order.Status.CANCELLED,
+                Order.PaymentStatus.PENDING, Order.PaymentStatus.PENDING, reason);
+        auditRecorder.recordOutbox(saved, "ORDER_CANCELLED", reason, null);
+        return toResponse(saved);
+    }
+
+    @Override
+    @Transactional
+    public OrderResponse transitionOrderStatus(Long orderId, OrderTransitionRequest request, String idempotencyKey) {
+        Order.Status target = parseTargetStatus(request == null ? null : request.status());
+        String reason = normalizeOptionalText(request == null ? null : request.reason(), MAX_REASON_LENGTH, "Lý do");
+        return idempotencyService.execute(idempotencyKey,
+                "POST:/api/v1/orders/" + orderId + "/transition",
+                new TransitionIdempotencyRequest(orderId, target.name(), reason), OrderResponse.class,
+                () -> transitionOrderStatusInternal(orderId, target, reason));
+    }
+
+    private OrderResponse transitionOrderStatusInternal(Long orderId, Order.Status target, String reason) {
+        Order order = lockOrder(orderId);
+        requirePosOrder(order);
+
+        if (order.getStatus() == target) {
+            return toResponse(order);
+        }
+        if (order.getStatus() == Order.Status.CANCELLED || order.getStatus() == Order.Status.DELIVERED) {
+            throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,
+                    "Đơn đã ở trạng thái kết thúc, không thể chuyển tiếp.");
+        }
+        if (order.getPaymentStatus() != Order.PaymentStatus.PAID) {
+            throw new BusinessRuleException(ErrorCode.ORDER_NOT_PAID,
+                    "Đơn chưa thanh toán không thể chuyển sang bước giao hàng.");
+        }
+
+        Order.Status from = order.getStatus();
+        if (!isAllowedTransition(from, target)) {
+            throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,
+                    "Không thể chuyển đơn từ " + from + " sang " + target + ".");
+        }
+
+        order.setStatus(target);
+        Order saved = orderRepository.save(order);
+
+        auditRecorder.recordHistory(saved, OrderStatusHistory.Action.STATUS_CHANGED,
+                from, target, Order.PaymentStatus.PAID, Order.PaymentStatus.PAID, reason);
+        auditRecorder.recordOutbox(saved, "ORDER_STATUS_CHANGED", reason, null);
+        return toResponse(saved);
+    }
+
+    @Override
+    @Transactional
+    public OrderResponse shipOrder(Long orderId) {
+        return transitionOrderStatusInternal(orderId, Order.Status.SHIPPED, null);
+    }
+
+    @Override
+    @Transactional
+    public OrderResponse handoverOrder(Long orderId, HandoverOrderRequest request, String idempotencyKey) {
+        String note = normalizeOptionalText(request == null ? null : request.note(), MAX_REASON_LENGTH, "Ghi chú");
+        return idempotencyService.execute(idempotencyKey,
+                "POST:/api/v1/orders/" + orderId + "/handover",
+                new HandoverIdempotencyRequest(orderId, note), OrderResponse.class,
+                () -> handoverOrderInternal(orderId, note));
+    }
+
+    private OrderResponse handoverOrderInternal(Long orderId, String note) {
+        Order order = lockOrder(orderId);
+        requirePosOrder(order);
+
+        if (order.getStatus() == Order.Status.DELIVERED) {
+            return toResponse(order);
+        }
+        if (order.getStatus() == Order.Status.CANCELLED) {
+            throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,
+                    "Không thể bàn giao đơn đã hủy.");
+        }
+        if (order.getPaymentStatus() != Order.PaymentStatus.PAID) {
+            throw new BusinessRuleException(ErrorCode.ORDER_NOT_PAID,
+                    "Đơn chưa thanh toán không thể bàn giao.");
+        }
+        if (order.getStatus() != Order.Status.CONFIRMED) {
+            throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,
+                    "Bàn giao tại quầy chỉ áp dụng cho đơn đã thanh toán đang CONFIRMED.");
+        }
+
+        order.setStatus(Order.Status.DELIVERED);
+        Order saved = orderRepository.save(order);
+
+        auditRecorder.recordHistory(saved, OrderStatusHistory.Action.HANDED_OVER,
+                Order.Status.CONFIRMED, Order.Status.DELIVERED,
+                Order.PaymentStatus.PAID, Order.PaymentStatus.PAID, note);
+        auditRecorder.recordOutbox(saved, "ORDER_HANDED_OVER", note, null);
+        return toResponse(saved);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<OrderHistoryResponse> getOrderHistory(Long orderId) {
+        if (!orderRepository.existsById(orderId)) {
+            throw new ResourceNotFoundException(ErrorCode.ORDER_NOT_FOUND,
+                    "Không tìm thấy đơn hàng #" + orderId);
+        }
+        return orderMapper.toHistoryResponseList(
+                historyRepository.findByOrderIdOrderByChangedAtDescIdDesc(orderId));
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public OrderExpirySweepResult expireAbandonedOrders() {
+        Instant now = Instant.now();
+        List<OrderRepository.ExpiredOrderCandidate> candidates = orderRepository.findExpiredOrderCandidates(
+                Order.Source.POS, Order.Status.PLACED, Order.PaymentStatus.PENDING, now);
+        int expired = 0;
+        int skipped = 0;
+        int failed = 0;
+
+        for (OrderRepository.ExpiredOrderCandidate candidate : candidates) {
+            try {
+                if (orderExpiryProcessor.expireOne(candidate.getId())) {
+                    expired++;
+                } else {
+                    skipped++;
+                }
+            } catch (Exception ex) {
+                failed++;
+                log.error("POS order expiry failed for orderId={}: {}", candidate.getId(), ex.getMessage(), ex);
+            }
+        }
+
+        if (failed > 0) {
+            log.warn("POS order expiry sweep completed with failures: expired={} skipped={} failed={}",
+                    expired, skipped, failed);
+        } else if (expired > 0) {
+            log.info("POS order expiry sweep completed: expired={} skipped={}", expired, skipped);
+        }
+        return new OrderExpirySweepResult(expired, skipped, failed);
+    }
+
+    private Map<Long, Long> loadVariantQuantities(Long orderId) {
+        Map<Long, Long> quantities = new TreeMap<>();
+        for (OrderRepository.VariantQuantity row : orderRepository.findVariantQuantitiesByOrderId(orderId)) {
+            if (row.getVariantId() == null || row.getQuantity() == null || row.getQuantity() <= 0) {
+                throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,
+                        "Đơn hàng có số lượng dòng không hợp lệ.");
+            }
+            quantities.put(row.getVariantId(), row.getQuantity());
+        }
+        return quantities;
+    }
+
+    private Map<Long, InventoryBalance> lockBalances(Map<Long, Long> quantities) {
+        Map<Long, InventoryBalance> balances = new LinkedHashMap<>();
+        for (Long variantId : quantities.keySet()) {
+            balances.put(variantId, balanceRepository.findByVariantIdWithLock(variantId)
+                    .orElseThrow(() -> new BusinessRuleException(ErrorCode.INVALID_STOCK_BALANCE,
+                            "Không tìm thấy số dư tồn kho cho variant #" + variantId)));
+        }
+        return balances;
+    }
+
+    private Order lockOrder(Long orderId) {
+        return orderRepository.findByIdForUpdate(orderId)
+                .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.ORDER_NOT_FOUND,
+                        "Không tìm thấy đơn hàng #" + orderId));
+    }
+
+    private void requireSameQuantities(Order order, Map<Long, Long> quantities) {
+        Map<Long, Long> lockedQuantities = aggregateOrderQuantities(order.getItems());
+        if (!lockedQuantities.equals(quantities)) {
+            throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,
+                    "Dòng đơn hàng đã thay đổi trong lúc xử lý; hãy thử lại.");
+        }
     }
 
     private Map<Long, Long> aggregateOrderQuantities(List<OrderItem> items) {
@@ -442,6 +770,126 @@ public class OrderServiceImpl implements OrderService {
             }
         }
         return quantities;
+    }
+
+    private void releaseReservedOnly(Order order,
+                                     Map<Long, Long> quantities,
+                                     Map<Long, InventoryBalance> balances,
+                                     String operation,
+                                     String reason) {
+        for (Map.Entry<Long, Long> entry : quantities.entrySet()) {
+            Long variantId = entry.getKey();
+            long quantityLong = entry.getValue();
+            if (quantityLong > Integer.MAX_VALUE) {
+                throw new BusinessRuleException(ErrorCode.INVALID_STOCK_BALANCE,
+                        "Số lượng giữ cho variant #" + variantId + " vượt giới hạn hỗ trợ.");
+            }
+            int quantity = (int) quantityLong;
+            InventoryBalance balance = balances.get(variantId);
+            if (balance.getReserved() < quantity) {
+                throw new BusinessRuleException(ErrorCode.INVALID_STOCK_BALANCE,
+                        "Số dư không đủ để giải phóng hàng giữ của đơn " + order.getOrderNumber());
+            }
+            InventoryMovementRecorder.Snapshot before = InventoryMovementRecorder.Snapshot.from(balance);
+            // Unpaid cancellation/expiry releases the hold only; on_hand must not change.
+            balance.setReserved(balance.getReserved() - quantity);
+            balanceRepository.save(balance);
+            movementRecorder.record(variantId, before, balance, operation, reason, order.getOrderNumber());
+        }
+    }
+
+    private void requirePosOrder(Order order) {
+        if (order.getSource() != Order.Source.POS) {
+            throw new BusinessRuleException(ErrorCode.MARKETPLACE_ACTION_FORBIDDEN,
+                    "API POS chỉ thao tác trên đơn POS; đơn marketplace do connector quản lý.");
+        }
+    }
+
+    private void requireBaseCurrency(Order order) {
+        if (!BASE_CURRENCY.equals(order.getCurrency())) {
+            throw new BusinessRuleException(ErrorCode.INVALID_CURRENCY,
+                    "Phase 03 chỉ hỗ trợ thanh toán đơn hàng " + BASE_CURRENCY + ".");
+        }
+    }
+
+    private String normalizePaymentMethod(String method) {
+        if (method == null || method.isBlank()) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                    "Phương thức thanh toán không được để trống.");
+        }
+        String normalized = method.trim().toUpperCase(Locale.ROOT);
+        if (!"CASH".equals(normalized) && !"BANK_TRANSFER".equals(normalized)) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                    "Chỉ hỗ trợ phương thức thanh toán CASH hoặc BANK_TRANSFER.");
+        }
+        return normalized;
+    }
+
+    private String requireReason(String reason) {
+        if (reason == null || reason.isBlank()) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "Lý do hủy không được để trống.");
+        }
+        String normalized = reason.trim();
+        if (normalized.length() > MAX_REASON_LENGTH) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                    "Lý do hủy không được vượt quá " + MAX_REASON_LENGTH + " ký tự.");
+        }
+        return normalized;
+    }
+
+    private String normalizeOptionalText(String value, int maxLength, String fieldName) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        if (normalized.isEmpty()) {
+            return null;
+        }
+        if (normalized.length() > maxLength) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                    fieldName + " không được vượt quá " + maxLength + " ký tự.");
+        }
+        return normalized;
+    }
+
+    private Order.Status parseTargetStatus(String status) {
+        if (status == null || status.isBlank()) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "Trạng thái đích không được để trống.");
+        }
+        Order.Status target;
+        try {
+            target = Order.Status.valueOf(status.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ex) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "Trạng thái đích không hợp lệ.");
+        }
+        if (target == Order.Status.PLACED || target == Order.Status.CANCELLED) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                    "Không thể chuyển đơn sang " + target + " qua API chuyển trạng thái.");
+        }
+        return target;
+    }
+
+    private boolean isAllowedTransition(Order.Status from, Order.Status target) {
+        return switch (from) {
+            case PLACED -> target == Order.Status.CONFIRMED;
+            case CONFIRMED -> target == Order.Status.PACKED;
+            case PACKED -> target == Order.Status.SHIPPED;
+            case SHIPPED -> target == Order.Status.DELIVERED;
+            default -> false;
+        };
+    }
+
+    private OrderResponse toResponse(Order order) {
+        PosPaymentDetail payment = paymentRepository.findById(order.getId()).orElse(null);
+        return orderMapper.toResponse(order, payment);
+    }
+
+    private PaymentIdempotencyRequest paymentFingerprint(Long orderId, RecordPaymentRequest request) {
+        if (request == null) {
+            return new PaymentIdempotencyRequest(orderId, null, null, null, null);
+        }
+        return new PaymentIdempotencyRequest(orderId, request.method(), request.cashReceived(),
+                request.reference(), request.note());
     }
 
     private boolean itemsMatch(Order order, Map<String, Integer> requestedBySku) {
@@ -515,35 +963,30 @@ public class OrderServiceImpl implements OrderService {
         }
     }
 
-    private String serializeOrderCreated(Order order) {
-        try {
-            return objectMapper.writeValueAsString(Map.of(
-                    "order_id", order.getId(),
-                    "order_number", order.getOrderNumber(),
-                    "source", order.getSource().name(),
-                    "total_minor", order.getTotalAmount(),
-                    "currency", order.getCurrency()));
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("Unable to serialize order outbox payload", ex);
-        }
-    }
-
-    @Override
-    @Transactional
-    public OrderResponse shipOrder(Long orderId) {
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.ORDER_NOT_FOUND, "Không tìm thấy đơn hàng #" + orderId));
-
-        order.setStatus(Order.Status.SHIPPED);
-        Order saved = orderRepository.save(order);
-        return orderMapper.toResponse(saved);
-    }
-
     private record RequestedLine(String sku, Integer quantity, Long expectedUnitPrice) {}
 
     private record ResolvedLine(ProductVariant variant, int quantity, long unitPrice) {}
 
     private record ResolvedOrder(List<ResolvedLine> lines, long totalAmount) {}
+
+    private record PaymentCommand(PosPaymentDetail.Method method,
+                                  long amountDue,
+                                  Long cashReceived,
+                                  Long changeAmount,
+                                  String reference,
+                                  String note) {}
+
+    private record PaymentIdempotencyRequest(Long orderId,
+                                             String method,
+                                             Long cashReceived,
+                                             String reference,
+                                             String note) {}
+
+    private record CancelIdempotencyRequest(Long orderId, String reason) {}
+
+    private record TransitionIdempotencyRequest(Long orderId, String status, String reason) {}
+
+    private record HandoverIdempotencyRequest(Long orderId, String note) {}
 
     private static final class MergedLine {
         private final String sku;

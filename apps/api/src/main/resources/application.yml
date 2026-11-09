@@ -92,6 +92,10 @@ app:
     ttl: ${IDEMPOTENCY_TTL:PT24H}
     cleanup-interval-ms: ${IDEMPOTENCY_CLEANUP_INTERVAL_MS:3600000}
 
+  orders:
+    # POS unpaid-order hold TTL. The expiry worker sweeps only POS + PLACED + PENDING orders.
+    hold-ttl: ${ORDER_HOLD_TTL:PT15M}
+
   sync:
     mode: ${INVENTORY_SYNC_MODE:eda}
     poll-interval-ms: 5000

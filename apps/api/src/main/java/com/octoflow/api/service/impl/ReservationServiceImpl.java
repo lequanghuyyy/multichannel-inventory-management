@@ -3,6 +3,7 @@ package com.octoflow.api.service.impl;
 import com.octoflow.api.dto.request.ReserveStockRequest;
 import com.octoflow.api.dto.response.ReservationResponse;
 import com.octoflow.api.entity.InventoryBalance;
+import com.octoflow.api.entity.Product;
 import com.octoflow.api.entity.ProductVariant;
 import com.octoflow.api.entity.Reservation;
 import com.octoflow.api.exception.BusinessRuleException;
@@ -10,6 +11,7 @@ import com.octoflow.api.exception.ErrorCode;
 import com.octoflow.api.exception.ResourceNotFoundException;
 import com.octoflow.api.mapper.ReservationMapper;
 import com.octoflow.api.repository.InventoryBalanceRepository;
+import com.octoflow.api.repository.ProductRepository;
 import com.octoflow.api.repository.ProductVariantRepository;
 import com.octoflow.api.repository.ReservationRepository;
 import com.octoflow.api.service.IdempotencyService;
@@ -34,6 +36,7 @@ public class ReservationServiceImpl implements ReservationService {
     private static final int MAX_TTL_MINUTES = 1440;
 
     private final ReservationRepository reservationRepository;
+    private final ProductRepository productRepository;
     private final InventoryBalanceRepository balanceRepository;
     private final ProductVariantRepository variantRepository;
     private final ReservationMapper reservationMapper;
@@ -42,6 +45,7 @@ public class ReservationServiceImpl implements ReservationService {
     private final ReservationExpiryProcessor expiryProcessor;
 
     public ReservationServiceImpl(ReservationRepository reservationRepository,
+                                  ProductRepository productRepository,
                                   InventoryBalanceRepository balanceRepository,
                                   ProductVariantRepository variantRepository,
                                   ReservationMapper reservationMapper,
@@ -49,6 +53,7 @@ public class ReservationServiceImpl implements ReservationService {
                                   InventoryMovementRecorder movementRecorder,
                                   ReservationExpiryProcessor expiryProcessor) {
         this.reservationRepository = reservationRepository;
+        this.productRepository = productRepository;
         this.balanceRepository = balanceRepository;
         this.variantRepository = variantRepository;
         this.reservationMapper = reservationMapper;
@@ -101,6 +106,15 @@ public class ReservationServiceImpl implements ReservationService {
         String sku = request.sku().trim();
         ProductVariant variant = variantRepository.findBySku(sku)
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.SKU_NOT_FOUND, "Không tìm thấy SKU " + sku));
+
+        // Canonical lock hierarchy: Product -> ProductVariant -> InventoryBalance
+        Product product = productRepository.findByIdForUpdate(variant.getProduct().getId())
+                .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.PRODUCT_NOT_FOUND,
+                        "Không tìm thấy sản phẩm #" + variant.getProduct().getId()));
+        if (product.getStatus() == Product.Status.ARCHIVED) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                    "Không thể giữ hàng cho sản phẩm đã ARCHIVED: " + product.getName());
+        }
 
         InventoryBalance balance = balanceRepository.findByVariantIdWithLock(variant.getId())
                 .orElseThrow(() -> new BusinessRuleException(ErrorCode.INSUFFICIENT_STOCK, "Chưa có số dư tồn kho cho SKU " + sku));
