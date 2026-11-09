@@ -56,8 +56,9 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     void lockExternalOrderIdentity(@Param("key") long key);
 
     /**
-     * Candidates for the abandoned-hold sweep. The database clock is used by the caller after
-     * locking, so this list is only a cheap pre-filter; the processor re-checks every condition.
+     * Candidates for the abandoned-hold sweep. The caller passes a timestamp read from the
+     * PostgreSQL clock, and the processor re-checks the deadline after locking. The batch is
+     * bounded and ordered by the deadline (then id) so a busy sweep is stable and predictable.
      */
     @Query("""
             SELECT o.id AS id FROM Order o
@@ -66,12 +67,13 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
               AND o.paymentStatus = :paymentStatus
               AND o.holdExpiresAt IS NOT NULL
               AND o.holdExpiresAt <= :now
-            ORDER BY o.id
+            ORDER BY o.holdExpiresAt ASC, o.id ASC
             """)
     List<ExpiredOrderCandidate> findExpiredOrderCandidates(@Param("source") Order.Source source,
                                                            @Param("status") Order.Status status,
                                                            @Param("paymentStatus") Order.PaymentStatus paymentStatus,
-                                                           @Param("now") Instant now);
+                                                           @Param("now") Instant now,
+                                                           Pageable pageable);
 
     /**
      * Legacy POS orders created before V7 have no hold deadline. They are repaired in small

@@ -2519,6 +2519,65 @@ class FoundationPostgresIntegrationTest {
         assertEquals(0, balance(anomalyFixture).getReserved());
     }
 
+    @Test
+    void expiryBatchContinuesAfterOneOrderFailsAndTwoWorkersReleaseEachHoldOnce() throws Exception {
+        Fixture brokenFixture = fixture(2, 0, 0);
+        OrderResponse broken = createPosOrder(brokenFixture, 1);
+        Fixture validFixture = fixture(2, 0, 0);
+        OrderResponse valid = createPosOrder(validFixture, 1);
+        jdbcTemplate.update("""
+                UPDATE orders SET hold_expires_at = clock_timestamp() - interval '1 minute'
+                WHERE id IN (?, ?)
+                """, broken.id(), valid.id());
+        jdbcTemplate.update("UPDATE inventory_balances SET reserved = 0 WHERE variant_id = ?",
+                brokenFixture.variantId());
+
+        OrderService.OrderExpirySweepResult firstSweep = orderService.expireAbandonedOrders();
+        assertTrue(firstSweep.expired() >= 1);
+        assertTrue(firstSweep.failed() >= 1);
+        assertEquals(Order.Status.CANCELLED,
+                orderRepository.findById(valid.id()).orElseThrow().getStatus());
+        assertEquals(Order.Status.PLACED,
+                orderRepository.findById(broken.id()).orElseThrow().getStatus());
+        assertEquals(0, balance(validFixture).getReserved());
+
+        // Repair the deliberately corrupted hold, then let two workers race for it.
+        jdbcTemplate.update("UPDATE inventory_balances SET reserved = 1 WHERE variant_id = ?",
+                brokenFixture.variantId());
+        jdbcTemplate.update("""
+                UPDATE orders SET hold_expires_at = clock_timestamp() - interval '1 minute'
+                WHERE id = ?
+                """, broken.id());
+
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<OrderService.OrderExpirySweepResult> workerOne = pool.submit(() -> {
+                ready.countDown();
+                start.await();
+                return orderService.expireAbandonedOrders();
+            });
+            Future<OrderService.OrderExpirySweepResult> workerTwo = pool.submit(() -> {
+                ready.countDown();
+                start.await();
+                return orderService.expireAbandonedOrders();
+            });
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            start.countDown();
+            workerOne.get(15, TimeUnit.SECONDS);
+            workerTwo.get(15, TimeUnit.SECONDS);
+
+            assertEquals(Order.Status.CANCELLED,
+                    orderRepository.findById(broken.id()).orElseThrow().getStatus());
+            assertEquals(0, balance(brokenFixture).getReserved());
+            assertEquals(2, ledgerCount(brokenFixture));
+            assertEquals(2, historyCount(broken.id()));
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
     private void assertPaymentConflict(Executable call) {
         ApiException conflict = assertThrows(ApiException.class, call);
         assertEquals(409, conflict.getStatus().value());

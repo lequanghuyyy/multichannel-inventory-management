@@ -95,6 +95,7 @@ app:
   orders:
     # POS unpaid-order hold TTL. The expiry worker sweeps only POS + PLACED + PENDING orders.
     hold-ttl: ${ORDER_HOLD_TTL:PT15M}
+    expiry-batch-size: ${ORDER_EXPIRY_BATCH_SIZE:100}
 
   sync:
     mode: ${INVENTORY_SYNC_MODE:eda}

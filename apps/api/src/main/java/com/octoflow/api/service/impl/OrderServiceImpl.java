@@ -780,9 +780,13 @@ public class OrderServiceImpl implements OrderService {
     public OrderExpirySweepResult expireAbandonedOrders() {
         RepairSummary repair = repairLegacyPosHolds();
 
-        Instant now = Instant.now();
+        // PostgreSQL is the single time source for candidate selection. The processor reads the
+        // clock again after acquiring the row locks, so a transaction that waited is re-evaluated
+        // against the latest database time rather than a stale application timestamp.
+        Instant now = orderRepository.databaseNow().toInstant();
         List<OrderRepository.ExpiredOrderCandidate> candidates = orderRepository.findExpiredOrderCandidates(
-                Order.Source.POS, Order.Status.PLACED, Order.PaymentStatus.PENDING, now);
+                Order.Source.POS, Order.Status.PLACED, Order.PaymentStatus.PENDING, now,
+                PageRequest.of(0, expiryBatchSize));
         int expired = 0;
         int skipped = 0;
         int failed = repair.failed();
