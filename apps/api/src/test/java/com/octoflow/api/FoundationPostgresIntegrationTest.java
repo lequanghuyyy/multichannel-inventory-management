@@ -70,6 +70,7 @@ import org.springframework.security.test.context.support.WithMockUser;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -2383,6 +2384,139 @@ class FoundationPostgresIntegrationTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void legacyPosHoldIsBackfilledFromCreatedAtAndExpiresThroughNormalAudit() {
+        Fixture fixture = fixture(4, 0, 0);
+        OrderResponse created = createPosOrder(fixture, 2);
+        jdbcTemplate.update("""
+                UPDATE orders SET created_at = clock_timestamp() - interval '1 hour',
+                                  hold_expires_at = NULL
+                WHERE id = ?
+                """, created.id());
+
+        OrderService.OrderExpirySweepResult result = orderService.expireAbandonedOrders();
+        assertTrue(result.expired() >= 1);
+
+        Order expired = orderRepository.findById(created.id()).orElseThrow();
+        assertEquals(Order.Status.CANCELLED, expired.getStatus());
+        assertEquals(Order.PaymentStatus.PENDING, expired.getPaymentStatus());
+        assertNull(expired.getHoldExpiresAt());
+        assertEquals(4, balance(fixture).getOnHand());
+        assertEquals(0, balance(fixture).getReserved());
+        assertEquals(2, ledgerCount(fixture));
+
+        List<OrderHistoryResponse> history = orderService.getOrderHistory(created.id());
+        assertEquals(2, history.size());
+        assertEquals("EXPIRED", history.get(0).action());
+        assertFalse(latestOrderOutbox(created.id(), "ORDER_EXPIRED").isBlank());
+
+        orderService.expireAbandonedOrders();
+        assertEquals(2, historyCount(created.id()));
+        assertEquals(2, ledgerCount(fixture));
+        assertEquals(0, balance(fixture).getReserved());
+    }
+
+    @Test
+    void legacyHoldBackfillIsMetadataOnlyAndDoesNotCreateLedgerOrHistory() {
+        Fixture fixture = fixture(3, 0, 0);
+        OrderResponse created = createPosOrder(fixture, 1);
+        jdbcTemplate.update("""
+                UPDATE orders SET created_at = clock_timestamp() - interval '1 minute',
+                                  hold_expires_at = NULL
+                WHERE id = ?
+                """, created.id());
+
+        int historyBefore = historyCount(created.id());
+        long ledgerBefore = ledgerCount(fixture);
+
+        orderService.expireAbandonedOrders();
+
+        Order order = orderRepository.findById(created.id()).orElseThrow();
+        assertEquals(Order.Status.PLACED, order.getStatus());
+        assertNotNull(order.getHoldExpiresAt());
+        assertTrue(order.getHoldExpiresAt().isAfter(Instant.now()));
+        assertEquals(3, balance(fixture).getOnHand());
+        assertEquals(1, balance(fixture).getReserved());
+        assertEquals(historyBefore, historyCount(created.id()));
+        assertEquals(ledgerBefore, ledgerCount(fixture));
+        assertEquals(0, jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM outbox_events
+                WHERE aggregate_type = 'ORDER' AND aggregate_id = ? AND event_type = 'ORDER_EXPIRED'
+                """, Integer.class, created.id().toString()));
+
+        // Clean up so the hold cannot leak into a later test.
+        jdbcTemplate.update(
+                "UPDATE orders SET hold_expires_at = clock_timestamp() - interval '1 minute' WHERE id = ?",
+                created.id());
+        orderService.expireAbandonedOrders();
+        assertEquals(Order.Status.CANCELLED,
+                orderRepository.findById(created.id()).orElseThrow().getStatus());
+    }
+
+    @Test
+    void legacyHoldRepairLeavesAnomaliesAndNonCandidatesUntouched() {
+        Fixture anomalyFixture = fixture(2, 0, 0);
+        OrderResponse anomaly = createPosOrder(anomalyFixture, 1);
+        jdbcTemplate.update("""
+                UPDATE orders SET created_at = clock_timestamp() - interval '1 hour',
+                                  hold_expires_at = NULL
+                WHERE id = ?
+                """, anomaly.id());
+        jdbcTemplate.update("UPDATE inventory_balances SET reserved = 0 WHERE variant_id = ?",
+                anomalyFixture.variantId());
+        int anomalyHistory = historyCount(anomaly.id());
+        long anomalyLedger = ledgerCount(anomalyFixture);
+
+        Fixture marketFixture = fixture(2, 0, 0);
+        Long channelId = insertChannel();
+        OrderResponse marketplace = orderService.createChannelOrder(new ChannelOrderCommand(
+                        channelId, Order.Source.SHOPIFY, "P31-LEGACY-" + UUID.randomUUID(), "VND",
+                        List.of(new ChannelOrderCommand.ChannelOrderLine(marketFixture.sku(), 1))),
+                "p31-market-" + UUID.randomUUID());
+
+        Fixture paidFixture = fixture(2, 0, 0);
+        OrderResponse paid = createPosOrder(paidFixture, 1);
+        orderService.confirmPayment(paid.id(),
+                new RecordPaymentRequest("CASH", 1000L, null, null),
+                "p31-paid-" + UUID.randomUUID());
+
+        Fixture cancelledFixture = fixture(2, 0, 0);
+        OrderResponse cancelled = createPosOrder(cancelledFixture, 1);
+        orderService.cancelOrder(cancelled.id(), new CancelOrderRequest("Hủy legacy"),
+                "p31-cancelled-" + UUID.randomUUID());
+
+        orderService.expireAbandonedOrders();
+
+        Order anomalyAfter = orderRepository.findById(anomaly.id()).orElseThrow();
+        assertEquals(Order.Status.PLACED, anomalyAfter.getStatus());
+        assertNull(anomalyAfter.getHoldExpiresAt());
+        assertEquals(anomalyHistory, historyCount(anomaly.id()));
+        assertEquals(anomalyLedger, ledgerCount(anomalyFixture));
+        assertEquals(0, balance(anomalyFixture).getReserved());
+
+        Order marketplaceAfter = orderRepository.findById(marketplace.id()).orElseThrow();
+        assertEquals(Order.Status.PLACED, marketplaceAfter.getStatus());
+        assertNull(marketplaceAfter.getHoldExpiresAt());
+        assertEquals(1, balance(marketFixture).getReserved());
+
+        Order paidAfter = orderRepository.findById(paid.id()).orElseThrow();
+        assertEquals(Order.Status.CONFIRMED, paidAfter.getStatus());
+        assertEquals(Order.PaymentStatus.PAID, paidAfter.getPaymentStatus());
+        assertNull(paidAfter.getHoldExpiresAt());
+
+        Order cancelledAfter = orderRepository.findById(cancelled.id()).orElseThrow();
+        assertEquals(Order.Status.CANCELLED, cancelledAfter.getStatus());
+        assertNull(cancelledAfter.getHoldExpiresAt());
+
+        // Once the corrupt reserved quantity is fixed, the same row is repaired and expired.
+        jdbcTemplate.update("UPDATE inventory_balances SET reserved = 1 WHERE variant_id = ?",
+                anomalyFixture.variantId());
+        orderService.expireAbandonedOrders();
+        assertEquals(Order.Status.CANCELLED,
+                orderRepository.findById(anomaly.id()).orElseThrow().getStatus());
+        assertEquals(0, balance(anomalyFixture).getReserved());
     }
 
     private void assertPaymentConflict(Executable call) {

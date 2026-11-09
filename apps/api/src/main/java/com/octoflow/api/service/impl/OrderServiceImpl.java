@@ -35,6 +35,7 @@ import com.octoflow.api.service.OrderService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -83,7 +84,9 @@ public class OrderServiceImpl implements OrderService {
     private final InventoryMovementRecorder movementRecorder;
     private final OrderAuditRecorder auditRecorder;
     private final OrderExpiryProcessor orderExpiryProcessor;
+    private final LegacyHoldRepairProcessor legacyHoldRepairProcessor;
     private final Duration holdTtl;
+    private final int expiryBatchSize;
 
     public OrderServiceImpl(OrderRepository orderRepository,
                             ProductRepository productRepository,
@@ -97,7 +100,9 @@ public class OrderServiceImpl implements OrderService {
                             InventoryMovementRecorder movementRecorder,
                             OrderAuditRecorder auditRecorder,
                             OrderExpiryProcessor orderExpiryProcessor,
-                            @Value("${app.orders.hold-ttl:PT15M}") Duration holdTtl) {
+                            LegacyHoldRepairProcessor legacyHoldRepairProcessor,
+                            @Value("${app.orders.hold-ttl:PT15M}") Duration holdTtl,
+                            @Value("${app.orders.expiry-batch-size:100}") int expiryBatchSize) {
         this.orderRepository = orderRepository;
         this.productRepository = productRepository;
         this.variantRepository = variantRepository;
@@ -110,9 +115,14 @@ public class OrderServiceImpl implements OrderService {
         this.movementRecorder = movementRecorder;
         this.auditRecorder = auditRecorder;
         this.orderExpiryProcessor = orderExpiryProcessor;
+        this.legacyHoldRepairProcessor = legacyHoldRepairProcessor;
         this.holdTtl = holdTtl;
+        this.expiryBatchSize = expiryBatchSize;
         if (holdTtl == null || holdTtl.isZero() || holdTtl.isNegative()) {
             throw new IllegalArgumentException("app.orders.hold-ttl must be a positive duration");
+        }
+        if (expiryBatchSize <= 0) {
+            throw new IllegalArgumentException("app.orders.expiry-batch-size must be positive");
         }
     }
 
@@ -768,12 +778,14 @@ public class OrderServiceImpl implements OrderService {
     @Override
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public OrderExpirySweepResult expireAbandonedOrders() {
+        RepairSummary repair = repairLegacyPosHolds();
+
         Instant now = Instant.now();
         List<OrderRepository.ExpiredOrderCandidate> candidates = orderRepository.findExpiredOrderCandidates(
                 Order.Source.POS, Order.Status.PLACED, Order.PaymentStatus.PENDING, now);
         int expired = 0;
         int skipped = 0;
-        int failed = 0;
+        int failed = repair.failed();
 
         for (OrderRepository.ExpiredOrderCandidate candidate : candidates) {
             try {
@@ -791,11 +803,60 @@ public class OrderServiceImpl implements OrderService {
         if (failed > 0) {
             log.warn("POS order expiry sweep completed with failures: expired={} skipped={} failed={}",
                     expired, skipped, failed);
-        } else if (expired > 0) {
-            log.info("POS order expiry sweep completed: expired={} skipped={}", expired, skipped);
+        } else if (expired > 0 || repair.repaired() > 0) {
+            log.info("POS order expiry sweep completed: expired={} skipped={} repairedLegacyHolds={}",
+                    expired, skipped, repair.repaired());
+        }
+        if (repair.anomalies() > 0) {
+            log.warn("Legacy POS hold repair left {} anomalous order(s) for manual review", repair.anomalies());
         }
         return new OrderExpirySweepResult(expired, skipped, failed);
     }
+
+    /**
+     * Backfills legacy POS holds before the expiry query runs. Keyset paging keeps each database
+     * round trip bounded while ensuring a permanently anomalous low-id row cannot starve valid
+     * rows later in the table. Every row still runs in its own transaction and lock scope.
+     */
+    private RepairSummary repairLegacyPosHolds() {
+        int repaired = 0;
+        int anomalies = 0;
+        int failed = 0;
+        long afterId = 0L;
+
+        while (true) {
+            List<OrderRepository.LegacyHoldCandidate> batch = orderRepository.findLegacyPosHoldCandidates(
+                    Order.Source.POS, Order.Status.PLACED, Order.PaymentStatus.PENDING,
+                    afterId, PageRequest.of(0, expiryBatchSize));
+            if (batch.isEmpty()) {
+                break;
+            }
+            for (OrderRepository.LegacyHoldCandidate candidate : batch) {
+                try {
+                    LegacyHoldRepairProcessor.RepairOutcome outcome =
+                            legacyHoldRepairProcessor.repairOne(candidate.getId());
+                    if (outcome.status() == LegacyHoldRepairProcessor.RepairStatus.REPAIRED) {
+                        repaired++;
+                    } else if (outcome.status() == LegacyHoldRepairProcessor.RepairStatus.ANOMALY) {
+                        anomalies++;
+                        log.warn("Legacy POS hold anomaly orderId={} orderNumber={}: {}",
+                                candidate.getId(), outcome.orderNumber(), outcome.detail());
+                    }
+                } catch (Exception ex) {
+                    failed++;
+                    log.error("Legacy POS hold repair failed for orderId={}: {}",
+                            candidate.getId(), ex.getMessage(), ex);
+                }
+            }
+            afterId = batch.getLast().getId();
+            if (batch.size() < expiryBatchSize) {
+                break;
+            }
+        }
+        return new RepairSummary(repaired, anomalies, failed);
+    }
+
+    private record RepairSummary(int repaired, int anomalies, int failed) {}
 
     private Map<Long, Long> loadVariantQuantities(Long orderId) {
         Map<Long, Long> quantities = new TreeMap<>();

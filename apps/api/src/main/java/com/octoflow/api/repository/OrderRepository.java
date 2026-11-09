@@ -2,6 +2,7 @@ package com.octoflow.api.repository;
 
 import com.octoflow.api.entity.Order;
 import jakarta.persistence.LockModeType;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
@@ -73,6 +74,25 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
                                                            @Param("now") Instant now);
 
     /**
+     * Legacy POS orders created before V7 have no hold deadline. They are repaired in small
+     * keyset-paged batches so an anomaly at the start of the table cannot starve later rows.
+     */
+    @Query("""
+            SELECT o.id AS id FROM Order o
+            WHERE o.source = :source
+              AND o.status = :status
+              AND o.paymentStatus = :paymentStatus
+              AND o.holdExpiresAt IS NULL
+              AND o.id > :afterId
+            ORDER BY o.id ASC
+            """)
+    List<LegacyHoldCandidate> findLegacyPosHoldCandidates(@Param("source") Order.Source source,
+                                                          @Param("status") Order.Status status,
+                                                          @Param("paymentStatus") Order.PaymentStatus paymentStatus,
+                                                          @Param("afterId") Long afterId,
+                                                          Pageable pageable);
+
+    /**
      * The database clock is read after inventory and order locks are held, so a transaction that
      * waited on a lock does not decide expiry from a stale application clock.
      */
@@ -86,6 +106,10 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
     }
 
     interface ExpiredOrderCandidate {
+        Long getId();
+    }
+
+    interface LegacyHoldCandidate {
         Long getId();
     }
 }
