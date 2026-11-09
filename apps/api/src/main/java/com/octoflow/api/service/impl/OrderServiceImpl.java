@@ -739,7 +739,11 @@ public class OrderServiceImpl implements OrderService {
         requirePosOrder(order);
 
         if (order.getStatus() == Order.Status.DELIVERED) {
-            return toResponse(order);
+            if (historyRepository.existsByOrderIdAndAction(orderId, OrderStatusHistory.Action.HANDED_OVER)) {
+                return toResponse(order);
+            }
+            throw new ApiException(HttpStatus.CONFLICT, ErrorCode.HANDOVER_NOT_APPLICABLE,
+                    "Đơn đã được giao qua quy trình vận chuyển; không thể ghi nhận bàn giao tại quầy.");
         }
         if (order.getStatus() == Order.Status.CANCELLED) {
             throw new BusinessRuleException(ErrorCode.INVALID_ORDER_STATE,

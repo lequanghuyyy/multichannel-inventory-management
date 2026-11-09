@@ -10,4 +10,6 @@ import java.util.List;
 public interface OrderStatusHistoryRepository extends JpaRepository<OrderStatusHistory, Long> {
 
     List<OrderStatusHistory> findByOrderIdOrderByChangedAtDescIdDesc(Long orderId);
+
+    boolean existsByOrderIdAndAction(Long orderId, OrderStatusHistory.Action action);
 }

@@ -1671,9 +1671,13 @@ class FoundationPostgresIntegrationTest {
         assertEquals("CREATED", history.get(history.size() - 1).action());
         assertEquals("PLACED", history.get(history.size() - 1).toStatus());
 
-        // Repeating a terminal handover is a no-op, not another history row.
-        orderService.handoverOrder(created.id(), new HandoverOrderRequest("Đã nhận"),
-                "phase3-handover-replay-" + UUID.randomUUID());
+        // This order reached DELIVERED through shipping, not counter handover. A later handover
+        // request must be rejected as a business conflict and must not add a fake HANDED_OVER row.
+        ApiException handoverAfterShipping = assertThrows(ApiException.class,
+                () -> orderService.handoverOrder(created.id(), new HandoverOrderRequest("Đã nhận"),
+                        "phase3-handover-replay-" + UUID.randomUUID()));
+        assertEquals(409, handoverAfterShipping.getStatus().value());
+        assertEquals("HANDOVER_NOT_APPLICABLE", handoverAfterShipping.getErrorCode().getCode());
         assertEquals(5, historyCount(created.id()));
     }
 
@@ -1886,8 +1890,11 @@ class FoundationPostgresIntegrationTest {
                         "phase3-terminal-" + UUID.randomUUID()));
         assertEquals("INVALID_ORDER_STATE", terminal.getErrorCode().getCode());
         int deliveredHistory = historyCount(paid.id());
-        orderService.handoverOrder(paid.id(), new HandoverOrderRequest(null),
-                "phase3-terminal-handover-" + UUID.randomUUID());
+        ApiException handoverAfterShipping = assertThrows(ApiException.class,
+                () -> orderService.handoverOrder(paid.id(), new HandoverOrderRequest(null),
+                        "phase3-terminal-handover-" + UUID.randomUUID()));
+        assertEquals(409, handoverAfterShipping.getStatus().value());
+        assertEquals("HANDOVER_NOT_APPLICABLE", handoverAfterShipping.getErrorCode().getCode());
         assertEquals(deliveredHistory, historyCount(paid.id()));
 
         // Marketplace orders cannot be paid, cancelled, transitioned, or handed over through POS.
@@ -2576,6 +2583,57 @@ class FoundationPostgresIntegrationTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void handoverIsIdempotentOnlyForCounterDeliveredOrders() throws Exception {
+        Fixture fixture = fixture(3, 0, 0);
+        OrderResponse created = createPosOrder(fixture, 1);
+        orderService.confirmPayment(created.id(),
+                new RecordPaymentRequest("CASH", 1000L, null, null),
+                "f05-pay-" + UUID.randomUUID());
+
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<OrderResponse> first = pool.submit(() -> {
+                ready.countDown();
+                start.await();
+                return orderService.handoverOrder(created.id(),
+                        new HandoverOrderRequest("first"), "f05-handover-a-" + UUID.randomUUID());
+            });
+            Future<OrderResponse> second = pool.submit(() -> {
+                ready.countDown();
+                start.await();
+                return orderService.handoverOrder(created.id(),
+                        new HandoverOrderRequest("second"), "f05-handover-b-" + UUID.randomUUID());
+            });
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            start.countDown();
+            assertNotNull(first.get(15, TimeUnit.SECONDS));
+            assertNotNull(second.get(15, TimeUnit.SECONDS));
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertEquals(1, jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM order_status_history
+                WHERE order_id = ? AND action = 'HANDED_OVER'
+                """, Integer.class, created.id()));
+        assertEquals(1, jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM outbox_events
+                WHERE aggregate_type = 'ORDER' AND aggregate_id = ? AND event_type = 'ORDER_HANDED_OVER'
+                """, Integer.class, created.id().toString()));
+        assertEquals(3, historyCount(created.id()));
+
+        OrderResponse replay = orderService.handoverOrder(created.id(),
+                new HandoverOrderRequest("third"), "f05-handover-c-" + UUID.randomUUID());
+        assertEquals("DELIVERED", replay.status());
+        assertEquals(1, jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM order_status_history
+                WHERE order_id = ? AND action = 'HANDED_OVER'
+                """, Integer.class, created.id()));
     }
 
     private void assertPaymentConflict(Executable call) {
