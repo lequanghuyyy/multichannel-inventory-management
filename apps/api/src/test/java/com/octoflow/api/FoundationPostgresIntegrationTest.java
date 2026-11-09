@@ -61,15 +61,20 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.springframework.security.test.context.support.WithMockUser;
 
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -118,6 +123,8 @@ class FoundationPostgresIntegrationTest {
     @Autowired ReceiptService receiptService;
     @Autowired OrderService orderService;
     @Autowired ProductService productService;
+    @Autowired PlatformTransactionManager transactionManager;
+    @PersistenceContext EntityManager entityManager;
     @Autowired ObjectMapper objectMapper;
 
     @Test
@@ -2131,6 +2138,160 @@ class FoundationPostgresIntegrationTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    // =========================================================================
+    // Phase 03.1 Review Fixes: F01-F05
+    // =========================================================================
+
+    @Test
+    void concurrentPriceChangeAfterResolutionUsesTheLockedVerifiedPrice() throws Exception {
+        Fixture fixture = fixture(5, 0, 0);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<OrderResponse> checkout = pool.submit(() -> {
+                start.await();
+                return createPosOrder(fixture, 2);
+            });
+
+            TransactionTemplate tx = new TransactionTemplate(transactionManager);
+            tx.executeWithoutResult(status -> {
+                productRepository.findByIdForUpdate(fixture.productId()).orElseThrow();
+                String blockerXid = entityManager.createNativeQuery("SELECT txid_current()::text")
+                        .getSingleResult().toString();
+                start.countDown();
+                awaitLockWait(blockerXid);
+                ProductVariant variant = variantRepository.findById(fixture.variantId()).orElseThrow();
+                variant.setPrice(1500L);
+                variantRepository.saveAndFlush(variant);
+            });
+
+            OrderResponse order = checkout.get(15, TimeUnit.SECONDS);
+            assertEquals(3000L, order.totalAmount());
+            assertEquals(1500L, order.items().getFirst().unitPrice());
+            assertEquals(2, balance(fixture).getReserved());
+            assertEquals(1, historyCount(order.id()));
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentSkuChangeAfterResolutionRejectsCheckoutWithoutSilentSubstitution() throws Exception {
+        Fixture fixture = fixture(5, 0, 0);
+        String newSku = "CHANGED-" + UUID.randomUUID().toString().substring(0, 8);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<OrderResponse> checkout = pool.submit(() -> {
+                start.await();
+                return createPosOrder(fixture, 1);
+            });
+
+            TransactionTemplate tx = new TransactionTemplate(transactionManager);
+            tx.executeWithoutResult(status -> {
+                productRepository.findByIdForUpdate(fixture.productId()).orElseThrow();
+                String blockerXid = entityManager.createNativeQuery("SELECT txid_current()::text")
+                        .getSingleResult().toString();
+                start.countDown();
+                awaitLockWait(blockerXid);
+                ProductVariant variant = variantRepository.findById(fixture.variantId()).orElseThrow();
+                variant.setSku(newSku);
+                variantRepository.saveAndFlush(variant);
+            });
+
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> checkout.get(15, TimeUnit.SECONDS));
+            assertInstanceOf(BusinessRuleException.class, failure.getCause());
+            assertEquals("PRICE_OR_STOCK_CHANGED",
+                    ((BusinessRuleException) failure.getCause()).getErrorCode().getCode());
+            assertEquals(0, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM order_items WHERE variant_id = ?",
+                    Integer.class, fixture.variantId()));
+            assertEquals(0, balance(fixture).getReserved());
+            assertEquals(5, balance(fixture).getOnHand());
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentArchiveAfterResolutionRejectsCheckoutWithoutReservingStock() throws Exception {
+        Fixture fixture = fixture(5, 0, 0);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<OrderResponse> checkout = pool.submit(() -> {
+                start.await();
+                return createPosOrder(fixture, 1);
+            });
+
+            TransactionTemplate tx = new TransactionTemplate(transactionManager);
+            tx.executeWithoutResult(status -> {
+                productRepository.findByIdForUpdate(fixture.productId()).orElseThrow();
+                String blockerXid = entityManager.createNativeQuery("SELECT txid_current()::text")
+                        .getSingleResult().toString();
+                start.countDown();
+                awaitLockWait(blockerXid);
+                productService.updateProduct(fixture.productId(),
+                        new UpdateProductRequest(null, null, null, "ARCHIVED"));
+            });
+
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> checkout.get(15, TimeUnit.SECONDS));
+            assertInstanceOf(BusinessRuleException.class, failure.getCause());
+            assertEquals("BAD_REQUEST", ((BusinessRuleException) failure.getCause()).getErrorCode().getCode());
+            assertEquals(0, balance(fixture).getReserved());
+            assertEquals(0, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM order_items WHERE variant_id = ?",
+                    Integer.class, fixture.variantId()));
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /**
+     * Waits until another backend is blocked on the transaction that holds the product row lock.
+     * PostgreSQL row locks are implemented as tuple locks, so a waiter appears as an ungranted
+     * {@code transactionid} ShareLock on the blocker's xid rather than a lock on the table
+     * relation. Matching that exact xid keeps scheduled workers or unrelated lock waits from
+     * being mistaken for the checkout under test.
+     */
+    private void awaitLockWait(String blockerXid) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            Integer waiting = jdbcTemplate.queryForObject("""
+                    SELECT COUNT(*) FROM pg_locks
+                    WHERE locktype = 'transactionid'
+                      AND NOT granted
+                      AND transactionid::text = ?
+                    """, Integer.class, blockerXid);
+            if (waiting != null && waiting > 0) {
+                return;
+            }
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                fail("Interrupted while waiting for a PostgreSQL lock wait");
+            }
+        }
+        List<Map<String, Object>> locks = jdbcTemplate.queryForList("""
+                SELECT l.pid, l.locktype, l.mode, l.granted, c.relname
+                FROM pg_locks l
+                LEFT JOIN pg_class c ON c.oid = l.relation
+                WHERE NOT l.granted
+                ORDER BY l.pid
+                """);
+        List<Map<String, Object>> activity = jdbcTemplate.queryForList("""
+                SELECT pid, state, wait_event_type, wait_event, left(query, 160) AS query
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                ORDER BY pid
+                """);
+        fail("No PostgreSQL row-lock wait observed for blockerXid=" + blockerXid
+                + " locks=" + locks + " activity=" + activity);
     }
 
     private OrderResponse createPosOrder(Fixture fixture, int quantity) {

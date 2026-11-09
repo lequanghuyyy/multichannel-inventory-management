@@ -148,7 +148,8 @@ public class OrderServiceImpl implements OrderService {
                 .map(item -> new RequestedLine(item.sku(), item.quantity(), item.unitPrice()))
                 .toList();
         MergedRequest merged = mergeRequestedLines(requested);
-        ResolvedOrder resolved = resolveOrder(merged, BASE_CURRENCY);
+        List<PendingLine> pending = resolveRequestedVariants(merged);
+        ResolvedOrder resolved = lockAndVerifyOrderLines(pending, BASE_CURRENCY);
 
         Order order = newOrder(Order.Source.POS, null, null, BASE_CURRENCY);
         // POS holds use the order row itself because no per-line reservation row is created.
@@ -191,10 +192,11 @@ public class OrderServiceImpl implements OrderService {
             return toResponse(order);
         }
 
-        ResolvedOrder resolved = resolveOrder(mergeRequestedLines(
+        List<PendingLine> pending = resolveRequestedVariants(mergeRequestedLines(
                 command.lines().stream()
                         .map(line -> new RequestedLine(line.sku(), line.quantity(), null))
-                        .toList()), currency);
+                        .toList()));
+        ResolvedOrder resolved = lockAndVerifyOrderLines(pending, currency);
         Order order = newOrder(command.source(), channel.getId(), externalOrderId, currency);
         // Marketplace orders are excluded from the POS hold-expiry sweep.
         reserveAndSave(order, resolved);
@@ -289,30 +291,89 @@ public class OrderServiceImpl implements OrderService {
         return quantities;
     }
 
-    private ResolvedOrder resolveOrder(MergedRequest merged, String currency) {
-        List<ResolvedLine> lines = new ArrayList<>(merged.lines().size());
+    private List<PendingLine> resolveRequestedVariants(MergedRequest merged) {
+        List<PendingLine> pending = new ArrayList<>(merged.lines().size());
         for (MergedLine requested : merged.lines().values()) {
-            ProductVariant variant = variantRepository.findBySku(requested.sku)
+            // Identity-only lookup: a managed ProductVariant here would remain in the
+            // persistence context and could be returned stale by the later locked re-read.
+            ProductVariantRepository.VariantIdentity identity = variantRepository
+                    .findIdentityBySku(requested.sku)
                     .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.SKU_NOT_FOUND,
                             "Không tìm thấy SKU " + requested.sku));
+            if (identity.getVariantId() == null || identity.getProductId() == null) {
+                throw new BusinessRuleException(ErrorCode.PRICE_OR_STOCK_CHANGED,
+                        "SKU " + requested.sku + " không còn gắn với sản phẩm hợp lệ; hãy tải lại.");
+            }
+            pending.add(new PendingLine(identity.getVariantId(), identity.getProductId(),
+                    requested.sku, requested.quantity, requested.expectedUnitPrice));
+        }
+        return pending;
+    }
+
+    /**
+     * Locks catalog rows in the canonical Product -> ProductVariant order, then re-reads every
+     * requested line and verifies the SKU, product identity, price, currency, and product status.
+     * The initial SKU lookup is only a candidate resolution; no price or SKU from that read is
+     * allowed to reach the order. A concurrent catalog update either commits before these locks
+     * (and is observed here) or waits until the checkout transaction completes.
+     */
+    private ResolvedOrder lockAndVerifyOrderLines(List<PendingLine> pending, String currency) {
+        List<Long> productIds = pending.stream()
+                .map(PendingLine::productId)
+                .distinct()
+                .sorted()
+                .toList();
+
+        Map<Long, Product> lockedProducts = new HashMap<>();
+        for (Long productId : productIds) {
+            Product product = productRepository.findByIdForUpdate(productId)
+                    .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.PRODUCT_NOT_FOUND,
+                            "Không tìm thấy sản phẩm #" + productId));
+            if (product.getStatus() == Product.Status.ARCHIVED) {
+                throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                        "Không thể tạo đơn hàng cho sản phẩm đã ARCHIVED: " + product.getName());
+            }
+            lockedProducts.put(productId, product);
+        }
+
+        List<PendingLine> sortedByVariant = pending.stream()
+                .sorted(Comparator.comparing(PendingLine::variantId))
+                .toList();
+        List<ResolvedLine> lines = new ArrayList<>(sortedByVariant.size());
+        for (PendingLine requested : sortedByVariant) {
+            ProductVariant variant = variantRepository.findByIdForUpdate(requested.variantId())
+                    .orElseThrow(() -> new BusinessRuleException(ErrorCode.PRICE_OR_STOCK_CHANGED,
+                            "SKU " + requested.sku() + " không còn tồn tại; hãy tải lại trước khi đặt hàng."));
+            if (!requested.sku().equals(variant.getSku())) {
+                throw new BusinessRuleException(ErrorCode.PRICE_OR_STOCK_CHANGED,
+                        "SKU " + requested.sku() + " đã được đổi thành " + variant.getSku()
+                                + "; hãy tải lại trước khi đặt hàng.");
+            }
+            Long currentProductId = variant.getProduct() == null ? null : variant.getProduct().getId();
+            if (!requested.productId().equals(currentProductId)
+                    || !lockedProducts.containsKey(currentProductId)) {
+                throw new BusinessRuleException(ErrorCode.PRICE_OR_STOCK_CHANGED,
+                        "SKU " + requested.sku() + " đã chuyển sang sản phẩm khác; hãy tải lại trước khi đặt hàng.");
+            }
+            Product product = lockedProducts.get(currentProductId);
+            if (product.getStatus() == Product.Status.ARCHIVED) {
+                throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                        "Không thể tạo đơn hàng cho sản phẩm đã ARCHIVED: " + product.getName());
+            }
 
             long price = requireVariantPrice(variant);
             String variantCurrency = normalizeCurrency(variant.getCurrency(), BASE_CURRENCY);
             if (!currency.equals(variantCurrency)) {
                 throw new BusinessRuleException(ErrorCode.INVALID_CURRENCY,
-                        "SKU " + requested.sku + " dùng tiền tệ " + variantCurrency
+                        "SKU " + requested.sku() + " dùng tiền tệ " + variantCurrency
                                 + ", không khớp tiền tệ đơn hàng " + currency + ".");
             }
-            if (requested.expectedUnitPrice != null && requested.expectedUnitPrice != price) {
+            if (requested.expectedUnitPrice() != null && requested.expectedUnitPrice() != price) {
                 throw new BusinessRuleException(ErrorCode.PRICE_OR_STOCK_CHANGED,
-                        "Giá bán của SKU " + requested.sku + " đã thay đổi; hãy tải lại trước khi đặt hàng.");
+                        "Giá bán của SKU " + requested.sku() + " đã thay đổi; hãy tải lại trước khi đặt hàng.");
             }
-            lines.add(new ResolvedLine(variant, requested.quantity, price));
+            lines.add(new ResolvedLine(variant, requested.quantity(), price));
         }
-
-        // All balance locks are taken in ascending variant_id order, independent of the order in
-        // which the client listed SKUs.
-        lines.sort(Comparator.comparing(line -> line.variant().getId()));
 
         long totalAmount = 0L;
         for (ResolvedLine line : lines) {
@@ -328,23 +389,8 @@ public class OrderServiceImpl implements OrderService {
     }
 
     private void reserveAndSave(Order order, ResolvedOrder resolved) {
-        // Canonical lock hierarchy: Product (sorted product_id ASC) -> ProductVariant -> InventoryBalance (sorted variant_id ASC).
-        List<Long> productIds = resolved.lines().stream()
-                .map(line -> line.variant().getProduct().getId())
-                .distinct()
-                .sorted()
-                .toList();
-
-        for (Long productId : productIds) {
-            Product product = productRepository.findByIdForUpdate(productId)
-                    .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.PRODUCT_NOT_FOUND,
-                            "Không tìm thấy sản phẩm #" + productId));
-            if (product.getStatus() == Product.Status.ARCHIVED) {
-                throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
-                        "Không thể tạo đơn hàng cho sản phẩm đã ARCHIVED: " + product.getName());
-            }
-        }
-
+        // Products and variants were already locked and verified by lockAndVerifyOrderLines.
+        // Balances are locked in ascending variant_id order, independent of the client line order.
         Map<Long, InventoryBalance> locked = new LinkedHashMap<>();
         for (ResolvedLine line : resolved.lines()) {
             InventoryBalance balance = balanceRepository.findByVariantIdWithLock(line.variant().getId())
@@ -964,6 +1010,9 @@ public class OrderServiceImpl implements OrderService {
     }
 
     private record RequestedLine(String sku, Integer quantity, Long expectedUnitPrice) {}
+
+    private record PendingLine(Long variantId, Long productId, String sku, int quantity,
+                               Long expectedUnitPrice) {}
 
     private record ResolvedLine(ProductVariant variant, int quantity, long unitPrice) {}
 
