@@ -6,6 +6,7 @@ import com.octoflow.api.adapter.ChannelInventoryAdapter;
 import com.octoflow.api.dto.response.ChannelSyncEvidenceResponse;
 import com.octoflow.api.entity.Channel;
 import com.octoflow.api.entity.ChannelListing;
+import com.octoflow.api.entity.SyncJob;
 import com.octoflow.api.exception.ApiException;
 import com.octoflow.api.exception.ErrorCode;
 import com.octoflow.api.exception.ResourceNotFoundException;
@@ -62,6 +63,8 @@ public class ReconciliationService {
     public List<Long> candidateListingIds() {
         return listingRepository.findReconciliationCandidateIds(
                 ChannelListing.MappingStatus.VERIFIED,
+                List.of(ChannelListing.SyncStatus.OUT_OF_SYNC, ChannelListing.SyncStatus.ERROR),
+                List.of(SyncJob.Status.UNCONFIRMED, SyncJob.Status.DRIFT),
                 PageRequest.of(0, candidateBatchSize));
     }
 

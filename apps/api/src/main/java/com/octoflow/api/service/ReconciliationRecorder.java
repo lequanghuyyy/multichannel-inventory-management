@@ -1,37 +1,46 @@
 package com.octoflow.api.service;
 
 import com.octoflow.api.dto.response.ChannelSyncEvidenceResponse;
+import com.octoflow.api.entity.AllocationPlan;
+import com.octoflow.api.entity.AllocationPlanItem;
 import com.octoflow.api.entity.ChannelListing;
 import com.octoflow.api.entity.ChannelSyncEvidence;
 import com.octoflow.api.entity.SyncJob;
 import com.octoflow.api.exception.ResourceNotFoundException;
 import com.octoflow.api.exception.ErrorCode;
+import com.octoflow.api.repository.AllocationPlanItemRepository;
 import com.octoflow.api.repository.ChannelListingRepository;
 import com.octoflow.api.repository.SyncJobRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
 /**
  * Applies a reconciliation observation after the remote read has completed. The target is the
- * listing's allocated quota; a mismatch is recorded as drift and queues a correction job.
+ * listing's allocated quota; a mismatch is recorded as drift and queues a correction job unless
+ * an allocation step for the same listing is still in flight. A matching read also resolves an
+ * earlier UNCONFIRMED job instead of retrying it blindly.
  */
 @Service
 public class ReconciliationRecorder {
 
     private final ChannelListingRepository listingRepository;
     private final SyncJobRepository jobRepository;
+    private final AllocationPlanItemRepository allocationPlanItemRepository;
     private final ChannelEvidenceRecorder evidenceRecorder;
     private final SyncEventBroadcaster broadcaster;
 
     public ReconciliationRecorder(ChannelListingRepository listingRepository,
                                   SyncJobRepository jobRepository,
+                                  AllocationPlanItemRepository allocationPlanItemRepository,
                                   ChannelEvidenceRecorder evidenceRecorder,
                                   SyncEventBroadcaster broadcaster) {
         this.listingRepository = listingRepository;
         this.jobRepository = jobRepository;
+        this.allocationPlanItemRepository = allocationPlanItemRepository;
         this.evidenceRecorder = evidenceRecorder;
         this.broadcaster = broadcaster;
     }
@@ -75,7 +84,9 @@ public class ReconciliationRecorder {
                 : "Reconciliation observed " + remoteQuantity + " but target is " + target + ".");
         listingRepository.save(listing);
 
-        if (!matches) {
+        resolveUncertainJobs(listing, target, remoteQuantity, remoteBefore, adapterName, reference);
+
+        if (!matches && !allocationInFlight(listing.getId())) {
             jobRepository.supersedeActiveForListing(listing.getId(),
                     "Reconciliation found drift; queued a fresh correction.");
             SyncJob correction = new SyncJob();
@@ -99,6 +110,44 @@ public class ReconciliationRecorder {
                 "verified_quantity", remoteQuantity,
                 "refresh_required", true));
         return toResponse(evidence);
+    }
+
+    private void resolveUncertainJobs(ChannelListing listing, int target, int remoteQuantity,
+                                      int remoteBefore, String adapterName, String reference) {
+        List<SyncJob> unresolved = jobRepository.findByListingIdAndStatusIn(listing.getId(),
+                List.of(SyncJob.Status.UNCONFIRMED, SyncJob.Status.DRIFT));
+        for (SyncJob job : unresolved) {
+            boolean stillCurrent = job.getTargetQuantity() == target
+                    && job.getAllocationRevision() == listing.getTargetAllocationRevision();
+            if (stillCurrent && remoteQuantity == target) {
+                job.setStatus(SyncJob.Status.VERIFIED);
+                job.setVerifiedQuantity(remoteQuantity);
+                job.setRemoteBefore(remoteBefore);
+                job.setRemoteAfter(remoteQuantity);
+                job.setVerifiedAt(Instant.now());
+                job.setLastError(null);
+                job.setLeaseOwner(null);
+                job.setLeaseUntil(null);
+                jobRepository.save(job);
+                evidenceRecorder.record(listing.getId(), job.getId(), null, null, "INVENTORY_SYNC",
+                        adapterName, "VERIFIED", target, null, null, remoteQuantity,
+                        remoteBefore, remoteQuantity, null,
+                        "Resolved by reconciliation read-back.", reference);
+            } else {
+                job.setStatus(SyncJob.Status.SUPERSEDED);
+                job.setLastError("Reconciliation observed " + remoteQuantity
+                        + " for a different target; job superseded.");
+                job.setLeaseOwner(null);
+                job.setLeaseUntil(null);
+                jobRepository.save(job);
+            }
+        }
+    }
+
+    private boolean allocationInFlight(Long listingId) {
+        return allocationPlanItemRepository.existsActiveForListing(listingId,
+                AllocationPlan.Status.APPLYING,
+                List.of(AllocationPlanItem.Status.PENDING, AllocationPlanItem.Status.RETRY_PENDING));
     }
 
     private ChannelSyncEvidenceResponse toResponse(ChannelSyncEvidence evidence) {

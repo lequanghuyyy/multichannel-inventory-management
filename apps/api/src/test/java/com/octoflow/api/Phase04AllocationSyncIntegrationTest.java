@@ -1,5 +1,7 @@
 package com.octoflow.api;
 
+import com.octoflow.api.adapter.ChannelAdapterException;
+import com.octoflow.api.adapter.ChannelInventoryAdapter;
 import com.octoflow.api.adapter.SimulatorStateService;
 import com.octoflow.api.dto.request.AllocationPreviewRequest;
 import com.octoflow.api.dto.request.InventoryAdjustRequest;
@@ -20,6 +22,7 @@ import com.octoflow.api.repository.ProductRepository;
 import com.octoflow.api.repository.ProductVariantRepository;
 import com.octoflow.api.service.AllocationExecutionService;
 import com.octoflow.api.service.AllocationService;
+import com.octoflow.api.service.ChannelMappingRecorder;
 import com.octoflow.api.service.ChannelService;
 import com.octoflow.api.service.InventoryService;
 import com.octoflow.api.service.OutboxDispatchService;
@@ -27,10 +30,12 @@ import com.octoflow.api.service.ReconciliationService;
 import com.octoflow.api.service.SimulatorAdminService;
 import com.octoflow.api.service.SyncJobDispatchService;
 import com.octoflow.api.service.SyncJobManagementService;
+import com.octoflow.api.service.SyncJobProcessor;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -46,10 +51,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -72,7 +79,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "app.sync.retry-max-ms=5",
         "app.sync.allocation-max-attempts=2",
         "app.sync.max-attempts=2",
-        "app.sync.lease-seconds=5"
+        "app.sync.lease-seconds=5",
+        "app.sync.reconciliation-batch-size=1000"
 })
 @AutoConfigureMockMvc
 @Testcontainers
@@ -103,6 +111,8 @@ class Phase04AllocationSyncIntegrationTest {
     @Autowired SimulatorAdminService simulatorAdminService;
     @Autowired SimulatorStateService simulatorStateService;
     @Autowired ChannelService channelService;
+    @Autowired ChannelMappingRecorder channelMappingRecorder;
+    @Autowired SyncJobProcessor syncJobProcessor;
 
     // ------------------------------------------------------------------
     // Preview and confirm safety
@@ -545,6 +555,285 @@ class Phase04AllocationSyncIntegrationTest {
     }
 
     // ------------------------------------------------------------------
+    // Phase 04.1 safety hardening (F01-F06)
+    // ------------------------------------------------------------------
+
+    @Test
+    @WithMockUser(roles = "ADMIN")
+    void increasesRecheckCoreVersionRevisionAndAtsBeforeEveryStep() {
+        assertIncreaseBlockedAfterBump(fixture -> jdbcTemplate.update(
+                "UPDATE inventory_balances SET version = version + 1 WHERE variant_id = ?",
+                fixture.variantId()));
+        assertIncreaseBlockedAfterBump(fixture -> jdbcTemplate.update(
+                "UPDATE variant_allocation_states SET current_revision = current_revision + 1, "
+                        + "next_revision = next_revision + 1 WHERE variant_id = ?",
+                fixture.variantId()));
+        assertIncreaseBlockedAfterBump(fixture -> jdbcTemplate.update(
+                "UPDATE inventory_balances SET reserved = 6 WHERE variant_id = ?",
+                fixture.variantId()));
+    }
+
+    @Test
+    void syncTimeoutBecomesUnconfirmedAndOnlyReconciliationResolvesIt() throws Exception {
+        Fixture fixture = fixture(10, 0, 0);
+        Long channelId = channel("simulated");
+        Long listingId = listing(channelId, fixture.variantId(), 5, ChannelListing.MappingStatus.VERIFIED);
+
+        inventoryService.adjustInventory(new InventoryAdjustRequest(fixture.sku(), 1, "phase041 timeout", null),
+                "timeout-seed-" + UUID.randomUUID());
+        dispatchOutboxUntilIdle(fixture.variantId());
+        Long jobId = latestJobId(listingId);
+
+        simulatorStateService.injectFault(listingId,
+                com.octoflow.api.entity.SimulatorFault.FaultType.TIMEOUT_AFTER_WRITE, 1, 0);
+        processJobsUntil(jobId, "UNCONFIRMED");
+
+        assertEquals(5, simulatorStateService.getState(listingId).quantity(),
+                "the simulator applied the write before timing out");
+        assertEquals(5, quota(listingId), "an uncertain remote result must never change the allocation");
+        assertEquals("ERROR", syncStatus(listingId));
+        assertTrue(jobEvidence(jobId).stream().anyMatch(row -> "UNCONFIRMED".equals(row.get("status"))
+                && "TIMEOUT".equals(row.get("error_code"))));
+        assertTrue(reconciliationService.candidateListingIds().contains(listingId),
+                "an unresolved job must make the listing a reconciliation candidate");
+
+        BusinessRuleException retry = assertThrows(BusinessRuleException.class,
+                () -> syncJobManagementService.retry(jobId));
+        assertEquals(ErrorCode.SYNC_RETRY_NOT_ALLOWED, retry.getErrorCode());
+
+        ChannelSyncEvidenceResponse observed = reconciliationService.reconcileListing(channelId, listingId);
+        assertEquals("VERIFIED", observed.status());
+        assertEquals("VERIFIED", jobStatus(jobId));
+        assertEquals("SYNCED", syncStatus(listingId));
+        assertTrue(jobEvidence(jobId).stream().anyMatch(row -> "VERIFIED".equals(row.get("status"))));
+    }
+
+    @Test
+    void staleSyncCompletionIsAlwaysUnconfirmedOrSuperseded() throws Exception {
+        assertStaleSyncCompletion(listingId -> jdbcTemplate.update("""
+                UPDATE channel_listings
+                SET allocated_quota = 3, target_allocation_revision = target_allocation_revision + 1
+                WHERE id = ?
+                """, listingId), 3);
+
+        assertStaleSyncCompletion(listingId -> jdbcTemplate.update("""
+                UPDATE channel_listings
+                SET external_listing_id = ?, mapping_version = mapping_version + 1
+                WHERE id = ?
+                """, "remapped-" + UUID.randomUUID(), listingId), 2);
+    }
+
+    @Test
+    void quotaZeroDriftIsReconciledAndQueuesAZeroCorrection() throws Exception {
+        Fixture fixture = fixture(10, 0, 0);
+        Long channelId = channel("simulated");
+        Long listingId = listing(channelId, fixture.variantId(), 0, ChannelListing.MappingStatus.VERIFIED);
+        simulatorStateService.setExternalStock(listingId, 3);
+
+        assertTrue(reconciliationService.candidateListingIds().contains(listingId),
+                "a quota=0 listing with remote stock must still be reconciled");
+
+        ChannelSyncEvidenceResponse observed = reconciliationService.reconcileListing(channelId, listingId);
+        assertEquals("DRIFT", observed.status());
+        assertEquals(0, observed.targetQuantity());
+        assertEquals(3, observed.verifiedQuantity());
+        assertEquals("OUT_OF_SYNC", syncStatus(listingId));
+
+        Long correctionId = latestJobId(listingId);
+        assertEquals("PENDING", jobStatus(correctionId));
+        assertEquals(0, jobTarget(correctionId));
+
+        processJobsUntil(correctionId, "VERIFIED");
+        assertEquals(0, simulatorStateService.getState(listingId).quantity());
+        assertEquals(0, quota(listingId));
+        assertEquals("SYNCED", syncStatus(listingId));
+    }
+
+    @Test
+    void oneExternalProductMayHostSeveralVariantsButOneExternalVariantOnlyOnce() {
+        Fixture fixture = fixture(0, 0, 0);
+        Long channelId = channel("simulated");
+        String externalProductId = "catalog-" + UUID.randomUUID();
+        String secondSku = addVariant(fixture, "P04-B");
+        String thirdSku = addVariant(fixture, "P04-C");
+        String fourthSku = addVariant(fixture, "P04-D");
+
+        ChannelListingResponse first = channelService.registerMapping(channelId,
+                new RegisterChannelMappingRequest(fixture.sku(), externalProductId, fixture.sku(), "ext-var-1"));
+        ChannelListingResponse second = channelService.registerMapping(channelId,
+                new RegisterChannelMappingRequest(secondSku, externalProductId, secondSku, "ext-var-2"));
+        assertEquals(externalProductId, first.externalListingId());
+        assertEquals(externalProductId, second.externalListingId());
+        assertEquals(2, jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM channel_listings
+                WHERE channel_id = ? AND external_listing_id = ?
+                """, Integer.class, channelId, externalProductId));
+
+        ApiException duplicateVariant = assertThrows(ApiException.class, () -> channelService.registerMapping(
+                channelId, new RegisterChannelMappingRequest(fourthSku,
+                        "catalog-other-" + UUID.randomUUID(), fourthSku, "ext-var-2")));
+        assertEquals(HttpStatus.CONFLICT, duplicateVariant.getStatus());
+        assertEquals(ErrorCode.DATA_INTEGRITY_VIOLATION, duplicateVariant.getErrorCode());
+
+        String standaloneProductId = "standalone-" + UUID.randomUUID();
+        channelService.registerMapping(channelId,
+                new RegisterChannelMappingRequest(thirdSku, standaloneProductId, thirdSku, null));
+        ApiException duplicateProduct = assertThrows(ApiException.class, () -> channelService.registerMapping(
+                channelId, new RegisterChannelMappingRequest(fourthSku, standaloneProductId, fourthSku, null)));
+        assertEquals(HttpStatus.CONFLICT, duplicateProduct.getStatus());
+        assertEquals(ErrorCode.DATA_INTEGRITY_VIOLATION, duplicateProduct.getErrorCode());
+        assertEquals(1, jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM channel_listings
+                WHERE channel_id = ? AND external_listing_id = ?
+                """, Integer.class, channelId, standaloneProductId));
+    }
+
+    @Test
+    void staleVerificationIsRejectedAndUnsafeRemapsAreBlocked() {
+        Fixture fixture = fixture(10, 0, 0);
+        Long channelId = channel("simulated");
+        String externalListingId = "product-" + UUID.randomUUID();
+        String externalVariantId = "variant-" + UUID.randomUUID();
+        ChannelListingResponse registered = channelService.registerMapping(channelId,
+                new RegisterChannelMappingRequest(fixture.sku(), externalListingId, fixture.sku(), externalVariantId));
+        ChannelListingResponse verified = channelService.verifyMapping(channelId, registered.id(), null);
+        assertEquals("VERIFIED", verified.mappingStatus());
+
+        long mappingVersion = jdbcTemplate.queryForObject(
+                "SELECT mapping_version FROM channel_listings WHERE id = ?", Long.class, registered.id());
+        int mappingEvidence = mappingEvidenceCount(registered.id());
+
+        ApiException stale = assertThrows(ApiException.class, () -> channelMappingRecorder.applyVerified(
+                channelId, registered.id(), "simulator", mappingVersion - 1,
+                externalListingId, externalVariantId, fixture.sku(),
+                new ChannelInventoryAdapter.MappingSnapshot(fixture.sku(), externalVariantId, 0, 0)));
+        assertEquals(HttpStatus.CONFLICT, stale.getStatus());
+        assertEquals(ErrorCode.CONCURRENT_MODIFICATION, stale.getErrorCode());
+        assertEquals(mappingEvidence, mappingEvidenceCount(registered.id()),
+                "a rejected stale verification must not append verification evidence");
+
+        jdbcTemplate.update("UPDATE channel_listings SET allocated_quota = 1 WHERE id = ?", registered.id());
+        assertRemapBlocked(channelId, fixture.sku(), externalVariantId);
+
+        jdbcTemplate.update("""
+                UPDATE channel_listings SET allocated_quota = 0, sync_status = 'OUT_OF_SYNC' WHERE id = ?
+                """, registered.id());
+        assertRemapBlocked(channelId, fixture.sku(), externalVariantId);
+
+        jdbcTemplate.update("UPDATE channel_listings SET sync_status = 'SYNCED' WHERE id = ?", registered.id());
+        jdbcTemplate.update("""
+                INSERT INTO sync_jobs (listing_id, channel_id, variant_id, target_quantity,
+                                       core_version, allocation_revision, status, attempts,
+                                       max_attempts, next_attempt_at)
+                VALUES (?, ?, ?, 0, 0, 0, 'PENDING', 0, 8, clock_timestamp())
+                """, registered.id(), channelId, fixture.variantId());
+        assertRemapBlocked(channelId, fixture.sku(), externalVariantId);
+
+        assertEquals(externalListingId, jdbcTemplate.queryForObject(
+                "SELECT external_listing_id FROM channel_listings WHERE id = ?",
+                String.class, registered.id()));
+    }
+
+    @Test
+    void expiredWorkerCannotCompleteANewerClaimAndRetryRulesAreEnforced() throws Exception {
+        Fixture fixture = fixture(10, 0, 0);
+        Long channelId = channel("simulated");
+        Long listingId = listing(channelId, fixture.variantId(), 2, ChannelListing.MappingStatus.VERIFIED);
+
+        inventoryService.adjustInventory(new InventoryAdjustRequest(fixture.sku(), 1, "phase041 fencing", null),
+                "fencing-seed-" + UUID.randomUUID());
+        dispatchOutboxUntilIdle(fixture.variantId());
+        Long jobId = latestJobId(listingId);
+
+        SyncJobProcessor.JobClaim older = claimJob(jobId);
+        jdbcTemplate.update(
+                "UPDATE sync_jobs SET lease_until = clock_timestamp() - interval '1 minute' WHERE id = ?", jobId);
+        SyncJobProcessor.JobClaim newer = claimJob(jobId);
+        assertTrue(newer.claimGeneration() > older.claimGeneration());
+
+        syncJobProcessor.completeFailure(older, ChannelAdapterException.Kind.PROTOCOL, "late worker result");
+        assertEquals("PROCESSING", jobStatus(jobId), "an expired claim must not complete the newer claim");
+        assertNull(jobRow(jobId).get("last_error"));
+
+        syncJobProcessor.releaseLease(older);
+        assertNotNull(jdbcTemplate.queryForObject(
+                "SELECT lease_owner FROM sync_jobs WHERE id = ?", String.class, jobId));
+        syncJobProcessor.releaseLease(newer);
+        assertNull(jdbcTemplate.queryForObject(
+                "SELECT lease_owner FROM sync_jobs WHERE id = ?", String.class, jobId));
+    }
+
+    @Test
+    void retryRejectsSupersededUnconfirmedAndStaleTargetJobs() throws Exception {
+        Fixture fixture = fixture(10, 0, 0);
+        Long channelId = channel("simulated");
+        Long listingId = listing(channelId, fixture.variantId(), 2, ChannelListing.MappingStatus.VERIFIED);
+
+        inventoryService.adjustInventory(new InventoryAdjustRequest(fixture.sku(), 1, "retry seed 1", null),
+                "retry-seed-1-" + UUID.randomUUID());
+        dispatchOutboxUntilIdle(fixture.variantId());
+        Long replacedJob = latestJobId(listingId);
+
+        inventoryService.adjustInventory(new InventoryAdjustRequest(fixture.sku(), 1, "retry seed 2", null),
+                "retry-seed-2-" + UUID.randomUUID());
+        dispatchOutboxUntilIdle(fixture.variantId());
+        Long currentJob = latestJobId(listingId);
+        assertEquals("SUPERSEDED", jobStatus(replacedJob));
+        assertEquals("PENDING", jobStatus(currentJob));
+
+        BusinessRuleException superseded = assertThrows(BusinessRuleException.class,
+                () -> syncJobManagementService.retry(replacedJob));
+        assertEquals(ErrorCode.SYNC_RETRY_NOT_ALLOWED, superseded.getErrorCode());
+
+        simulatorStateService.injectFault(listingId,
+                com.octoflow.api.entity.SimulatorFault.FaultType.TIMEOUT_AFTER_WRITE, 1, 0);
+        processJobsUntil(currentJob, "UNCONFIRMED");
+        BusinessRuleException unconfirmed = assertThrows(BusinessRuleException.class,
+                () -> syncJobManagementService.retry(currentJob));
+        assertEquals(ErrorCode.SYNC_RETRY_NOT_ALLOWED, unconfirmed.getErrorCode());
+
+        assertEquals("VERIFIED", reconciliationService.reconcileListing(channelId, listingId).status());
+        inventoryService.adjustInventory(new InventoryAdjustRequest(fixture.sku(), 1, "retry seed 3", null),
+                "retry-seed-3-" + UUID.randomUUID());
+        dispatchOutboxUntilIdle(fixture.variantId());
+        Long deadLetterJob = latestJobId(listingId);
+        simulatorAdminService.injectFault(channelId, listingId,
+                new SimulatorFaultRequest("REFUSE", 10, 0));
+        processJobsUntil(deadLetterJob, "DEAD_LETTER");
+        simulatorAdminService.clearFault(channelId, listingId);
+
+        jdbcTemplate.update("UPDATE channel_listings SET allocated_quota = 3 WHERE id = ?", listingId);
+        BusinessRuleException staleTarget = assertThrows(BusinessRuleException.class,
+                () -> syncJobManagementService.retry(deadLetterJob));
+        assertEquals(ErrorCode.SYNC_RETRY_NOT_ALLOWED, staleTarget.getErrorCode());
+    }
+
+    @Test
+    void simulatorAppliesSameReferenceOnceAndRejectsADifferentPayload() {
+        Fixture fixture = fixture(0, 0, 0);
+        Long channelId = channel("simulated");
+        Long listingId = listing(channelId, fixture.variantId(), 0, ChannelListing.MappingStatus.VERIFIED);
+
+        SimulatorStateService.Snapshot first = simulatorStateService.applyWrite(listingId, 5, false, "ref-1");
+        assertEquals(5, first.quantity());
+
+        SimulatorStateService.Snapshot replay = simulatorStateService.applyWrite(listingId, 5, false, "ref-1");
+        assertEquals(5, replay.quantity());
+        assertEquals(first.version(), replay.version(), "same reference and payload must be a no-op");
+
+        ChannelAdapterException conflict = assertThrows(ChannelAdapterException.class,
+                () -> simulatorStateService.applyWrite(listingId, 6, false, "ref-1"));
+        assertEquals(ChannelAdapterException.Kind.REFUSED, conflict.getKind());
+        assertEquals(5, simulatorStateService.getState(listingId).quantity());
+
+        simulatorStateService.setExternalStock(listingId, 4);
+        SimulatorStateService.Snapshot afterExternalChange =
+                simulatorStateService.applyWrite(listingId, 6, false, "ref-1");
+        assertEquals(6, afterExternalChange.quantity(),
+                "an external stock change invalidates the previous idempotency reference");
+    }
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
 
@@ -732,6 +1021,106 @@ class Phase04AllocationSyncIntegrationTest {
         }
         throw new AssertionError("Sync job #" + jobId + " did not reach " + expected
                 + "; last status was " + jobStatus(jobId));
+    }
+
+    private void assertIncreaseBlockedAfterBump(Consumer<Fixture> bump) {
+        Fixture fixture = fixture(10, 0, 0);
+        Long decreaseChannel = channel("simulated");
+        Long increaseChannel = channel("simulated");
+        Long decreaseListing = listing(decreaseChannel, fixture.variantId(), 5, ChannelListing.MappingStatus.VERIFIED);
+        Long increaseListing = listing(increaseChannel, fixture.variantId(), 0, ChannelListing.MappingStatus.VERIFIED);
+        simulatorStateService.setExternalStock(decreaseListing, 5);
+        simulatorStateService.setExternalStock(increaseListing, 0);
+
+        Map<Long, Integer> desired = new LinkedHashMap<>();
+        desired.put(decreaseListing, 2);
+        desired.put(increaseListing, 3);
+        AllocationPlanResponse plan = preview(fixture.sku(), desired);
+        allocationService.confirm(plan.id(), "budget-" + UUID.randomUUID());
+        bump.accept(fixture);
+
+        assertTrue(allocationExecutionService.processPlan(plan.id()));
+        assertEquals("VERIFIED", itemStatus(plan.id(), decreaseListing),
+                "decreases must keep running when only increases become unsafe");
+        assertEquals(2, quota(decreaseListing));
+
+        assertFalse(allocationExecutionService.processPlan(plan.id()),
+                "the stale budget must block without executing another remote write");
+        assertEquals("BLOCKED", planStatus(plan.id()));
+        assertEquals("BLOCKED", itemStatus(plan.id(), increaseListing));
+        assertEquals(0, quota(increaseListing));
+        assertEquals(0, simulatorStateService.getState(increaseListing).quantity());
+        assertEquals(2, simulatorStateService.getState(decreaseListing).quantity());
+        assertTrue(evidenceForPlan(plan.id()).stream()
+                .filter(row -> "ALLOCATION_INCREASE".equals(row.get("kind")))
+                .anyMatch(row -> "ERROR".equals(row.get("status"))
+                        && "ALLOCATION_BUDGET_STALE".equals(row.get("error_code"))));
+    }
+
+    private void assertStaleSyncCompletion(Consumer<Long> mutation, int expectedReplacementTarget) throws Exception {
+        Fixture fixture = fixture(10, 0, 0);
+        Long channelId = channel("simulated");
+        Long listingId = listing(channelId, fixture.variantId(), 2, ChannelListing.MappingStatus.VERIFIED);
+        inventoryService.adjustInventory(new InventoryAdjustRequest(fixture.sku(), 1, "phase041 stale", null),
+                "stale-seed-" + UUID.randomUUID());
+        dispatchOutboxUntilIdle(fixture.variantId());
+        Long jobId = latestJobId(listingId);
+
+        SyncJobProcessor.JobClaim claim = claimJob(jobId);
+        SyncJobProcessor.SyncJobSnapshot snapshot = syncJobProcessor.prepare(claim);
+        assertNotNull(snapshot);
+
+        mutation.accept(listingId);
+        syncJobProcessor.completeSuccess(snapshot, 2, 2, 2, 2);
+
+        assertEquals("SUPERSEDED", jobStatus(jobId));
+        assertTrue(jobEvidence(jobId).stream().anyMatch(row -> "UNCONFIRMED".equals(row.get("status"))
+                && "STALE_AFTER_WRITE".equals(row.get("error_code"))));
+        assertTrue(jobEvidence(jobId).stream().noneMatch(row -> "VERIFIED".equals(row.get("status"))),
+                "a stale result must never become VERIFIED");
+
+        Long replacementId = latestJobId(listingId);
+        assertNotEquals(jobId, replacementId);
+        assertEquals(expectedReplacementTarget, jobTarget(replacementId));
+    }
+
+    private SyncJobProcessor.JobClaim claimJob(Long jobId) throws Exception {
+        for (int i = 0; i < 100; i++) {
+            for (SyncJobProcessor.JobClaim claim : syncJobProcessor.claimDue(1000, 5)) {
+                if (claim.jobId().equals(jobId)) {
+                    return claim;
+                }
+            }
+            Thread.sleep(10);
+        }
+        throw new AssertionError("Sync job #" + jobId + " could not be claimed");
+    }
+
+    private String addVariant(Fixture fixture, String label) {
+        Product product = productRepository.findById(fixture.productId()).orElseThrow();
+        String sku = "P04-" + UUID.randomUUID().toString()
+                .replace("-", "").substring(0, 12).toUpperCase();
+        ProductVariant variant = new ProductVariant();
+        variant.setProduct(product);
+        variant.setSku(sku);
+        variant.setTitle(label);
+        variant.setPrice(1000L);
+        variantRepository.saveAndFlush(variant);
+        return sku;
+    }
+
+    private void assertRemapBlocked(Long channelId, String sku, String externalVariantId) {
+        BusinessRuleException blocked = assertThrows(BusinessRuleException.class,
+                () -> channelService.registerMapping(channelId, new RegisterChannelMappingRequest(
+                        sku, "remap-" + UUID.randomUUID(), sku, externalVariantId)));
+        assertEquals(ErrorCode.MAPPING_REMAP_BLOCKED, blocked.getErrorCode());
+    }
+
+    private int mappingEvidenceCount(Long listingId) {
+        return jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM channel_sync_evidence
+                WHERE listing_id = ? AND kind = 'MAPPING_VERIFY'
+                """, Integer.class, listingId);
     }
 
     private record Fixture(Long productId, Long variantId, String sku) {}

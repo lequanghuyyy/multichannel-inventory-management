@@ -1,19 +1,21 @@
 package com.octoflow.api.service;
 
 import com.octoflow.api.adapter.ChannelAdapterException;
-import com.octoflow.api.adapter.ChannelInventoryAdapter;
 import com.octoflow.api.adapter.ChannelAdapterRouter;
+import com.octoflow.api.adapter.ChannelInventoryAdapter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Drives allocation plans one item at a time. The processor is a separate bean so its
  * transactional boundaries stay real; adapter I/O runs under a per-listing advisory lock and
- * outside any database transaction.
+ * outside any database transaction. The lock is the same one used by sync job dispatch and
+ * reconciliation, so no two flows write the same listing concurrently.
  */
 @Service
 public class AllocationExecutionService {
@@ -36,33 +38,38 @@ public class AllocationExecutionService {
     }
 
     public int processDuePlans() {
-        List<Long> planIds = processor.claimDuePlans(batchSize);
+        List<AllocationExecutionProcessor.PlanClaim> claims = processor.claimDuePlans(batchSize);
         int processed = 0;
-        for (Long planId : planIds) {
+        for (AllocationExecutionProcessor.PlanClaim claim : claims) {
             try {
-                if (processPlan(planId)) {
+                if (processPlan(claim)) {
                     processed++;
                 }
             } catch (RuntimeException ex) {
-                log.error("Allocation plan #{} failed unexpectedly: {}", planId, ex.getMessage(), ex);
-                safeRelease(planId);
+                log.error("Allocation plan #{} failed unexpectedly: {}", claim.planId(), ex.getMessage(), ex);
+                safeRelease(claim);
             }
         }
         return processed;
     }
 
     public boolean processPlan(Long planId) {
-        AllocationExecutionProcessor.PlanAction action = processor.prepareNextAction(planId);
+        return processor.claimPlan(planId).map(this::processPlan).orElse(false);
+    }
+
+    public boolean processPlan(AllocationExecutionProcessor.PlanClaim claim) {
+        AllocationExecutionProcessor.PlanAction action = processor.prepareNextAction(claim);
         if (action == null) {
             return false;
         }
-        boolean acquired = listingLeaseService.tryWithLock(action.listingId(), () -> execute(action));
-        if (!acquired) {
-            // Another worker owns the listing. Release the plan lease so a later tick can retry.
-            safeRelease(planId);
+        Optional<Boolean> result = listingLeaseService.tryCallWithLock(action.listingId(),
+                () -> execute(action));
+        if (result.isEmpty()) {
+            // Another worker owns the listing. Release only this claim so a later tick can retry.
+            safeRelease(claim);
             return false;
         }
-        return true;
+        return result.get();
     }
 
     private boolean execute(AllocationExecutionProcessor.PlanAction action) {
@@ -95,11 +102,11 @@ public class AllocationExecutionService {
         return true;
     }
 
-    private void safeRelease(Long planId) {
+    private void safeRelease(AllocationExecutionProcessor.PlanClaim claim) {
         try {
-            processor.releaseLease(planId);
+            processor.releaseLease(claim);
         } catch (RuntimeException ex) {
-            log.warn("Unable to release allocation plan lease #{}: {}", planId, ex.getMessage());
+            log.warn("Unable to release allocation plan lease #{}: {}", claim.planId(), ex.getMessage());
         }
     }
 }

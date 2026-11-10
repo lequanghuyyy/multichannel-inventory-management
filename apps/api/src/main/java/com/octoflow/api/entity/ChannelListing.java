@@ -37,6 +37,9 @@ public class ChannelListing extends BaseEntity {
     @Column(name = "mapping_verified_at")
     private Instant mappingVerifiedAt;
 
+    @Column(name = "mapping_version", nullable = false)
+    private long mappingVersion;
+
     @Column(name = "active", nullable = false)
     private boolean active = true;
 
@@ -138,6 +141,14 @@ public class ChannelListing extends BaseEntity {
 
     public void setMappingVerifiedAt(Instant mappingVerifiedAt) {
         this.mappingVerifiedAt = mappingVerifiedAt;
+    }
+
+    public long getMappingVersion() {
+        return mappingVersion;
+    }
+
+    public void setMappingVersion(long mappingVersion) {
+        this.mappingVersion = mappingVersion;
     }
 
     public boolean isActive() {

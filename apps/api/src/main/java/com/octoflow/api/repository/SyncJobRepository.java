@@ -22,6 +22,9 @@ public interface SyncJobRepository extends JpaRepository<SyncJob, Long> {
     @Query("SELECT j FROM SyncJob j WHERE j.id = :id")
     Optional<SyncJob> findByIdForUpdate(@Param("id") Long id);
 
+    @Query("SELECT j.listingId FROM SyncJob j WHERE j.id = :id")
+    Long findListingIdById(@Param("id") Long id);
+
     List<SyncJob> findByListingIdAndStatusIn(Long listingId, Collection<SyncJob.Status> statuses);
 
     List<SyncJob> findByStatusInOrderByCreatedAtDescIdDesc(Collection<SyncJob.Status> statuses, Pageable pageable);
@@ -38,7 +41,30 @@ public interface SyncJobRepository extends JpaRepository<SyncJob, Long> {
 
     boolean existsByListingIdAndStatusIn(Long listingId, Collection<SyncJob.Status> statuses);
 
+    boolean existsByListingIdAndStatusInAndIdNot(Long listingId, Collection<SyncJob.Status> statuses, Long id);
+
     long countByStatus(SyncJob.Status status);
+
+    @Modifying
+    @Query(value = """
+            UPDATE sync_jobs
+            SET status = 'PROCESSING',
+                attempts = attempts + 1,
+                claim_generation = claim_generation + 1,
+                lease_owner = :owner,
+                lease_until = :leaseUntil,
+                last_attempt_at = clock_timestamp(),
+                updated_at = clock_timestamp()
+            WHERE id = :id
+              AND (status IN ('PENDING', 'RETRY_PENDING')
+                   OR (status = 'PROCESSING' AND (lease_until IS NULL OR lease_until < clock_timestamp())))
+            """, nativeQuery = true)
+    int markProcessing(@Param("id") Long id,
+                       @Param("owner") String owner,
+                       @Param("leaseUntil") Instant leaseUntil);
+
+    @Query(value = "SELECT claim_generation FROM sync_jobs WHERE id = :id", nativeQuery = true)
+    Long findClaimGeneration(@Param("id") Long id);
 
     @Modifying
     @Query(value = """
@@ -47,8 +73,13 @@ public interface SyncJobRepository extends JpaRepository<SyncJob, Long> {
                 lease_until = NULL,
                 updated_at = clock_timestamp()
             WHERE id = :id
+              AND status = 'PROCESSING'
+              AND lease_owner = :owner
+              AND claim_generation = :generation
             """, nativeQuery = true)
-    int releaseLease(@Param("id") Long id);
+    int releaseLease(@Param("id") Long id,
+                     @Param("owner") String owner,
+                     @Param("generation") long generation);
 
     @Query(value = """
             SELECT id FROM sync_jobs
@@ -59,23 +90,6 @@ public interface SyncJobRepository extends JpaRepository<SyncJob, Long> {
             FOR UPDATE SKIP LOCKED
             """, nativeQuery = true)
     List<Long> claimDueJobIds(@Param("batch") int batch);
-
-    @Modifying
-    @Query(value = """
-            UPDATE sync_jobs
-            SET status = 'PROCESSING',
-                attempts = attempts + 1,
-                lease_owner = :owner,
-                lease_until = :leaseUntil,
-                last_attempt_at = clock_timestamp(),
-                updated_at = clock_timestamp()
-            WHERE id IN (:ids)
-              AND (status IN ('PENDING', 'RETRY_PENDING')
-                   OR (status = 'PROCESSING' AND (lease_until IS NULL OR lease_until < clock_timestamp())))
-            """, nativeQuery = true)
-    int markProcessing(@Param("ids") Collection<Long> ids,
-                       @Param("owner") String owner,
-                       @Param("leaseUntil") Instant leaseUntil);
 
     @Modifying
     @Query(value = """
@@ -102,7 +116,7 @@ public interface SyncJobRepository extends JpaRepository<SyncJob, Long> {
                 last_error = NULL,
                 updated_at = clock_timestamp()
             WHERE id = :id
-              AND status IN ('RETRY_PENDING', 'DEAD_LETTER', 'DRIFT', 'UNCONFIRMED', 'BLOCKED', 'SUPERSEDED')
+              AND status IN ('RETRY_PENDING', 'DEAD_LETTER', 'DRIFT', 'BLOCKED')
             """, nativeQuery = true)
     int resetForRetry(@Param("id") Long id);
 }

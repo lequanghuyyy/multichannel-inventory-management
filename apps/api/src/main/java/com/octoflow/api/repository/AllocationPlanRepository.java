@@ -49,13 +49,18 @@ public interface AllocationPlanRepository extends JpaRepository<AllocationPlan, 
             UPDATE allocation_plans
             SET lease_owner = :owner,
                 lease_until = :leaseUntil,
+                claim_generation = claim_generation + 1,
                 updated_at = clock_timestamp()
-            WHERE id IN (:ids)
+            WHERE id = :id
               AND status = 'APPLYING'
+              AND (lease_until IS NULL OR lease_until < clock_timestamp())
             """, nativeQuery = true)
-    int leasePlans(@Param("ids") Collection<Long> ids,
-                   @Param("owner") String owner,
-                   @Param("leaseUntil") Instant leaseUntil);
+    int leasePlan(@Param("id") Long id,
+                  @Param("owner") String owner,
+                  @Param("leaseUntil") Instant leaseUntil);
+
+    @Query(value = "SELECT claim_generation FROM allocation_plans WHERE id = :id", nativeQuery = true)
+    Long findClaimGeneration(@Param("id") Long id);
 
     @Modifying
     @Query(value = """
@@ -65,8 +70,12 @@ public interface AllocationPlanRepository extends JpaRepository<AllocationPlan, 
                 updated_at = clock_timestamp()
             WHERE id = :id
               AND status = 'APPLYING'
+              AND lease_owner = :owner
+              AND claim_generation = :generation
             """, nativeQuery = true)
-    int releaseLease(@Param("id") Long id);
+    int releaseLease(@Param("id") Long id,
+                     @Param("owner") String owner,
+                     @Param("generation") long generation);
 
     @Modifying
     @Query(value = """

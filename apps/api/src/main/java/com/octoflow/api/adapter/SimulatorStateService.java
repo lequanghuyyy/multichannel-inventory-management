@@ -64,16 +64,27 @@ public class SimulatorStateService {
     }
 
     @Transactional
-    public Snapshot applyWrite(Long listingId, int quantity, boolean duplicate) {
+    public Snapshot applyWrite(Long listingId, int quantity, boolean duplicate, String idempotencyReference) {
         stateRepository.ensureExists(listingId);
         SimulatorListingState state = lockState(listingId);
+        if (idempotencyReference != null
+                && idempotencyReference.equals(state.getLastIdempotencyReference())) {
+            if (state.getLastWriteQuantity() != null && state.getLastWriteQuantity() == quantity) {
+                // Same reference and payload: the remote channel already applied this write.
+                return new Snapshot(state.getQuantity(), state.getVersion());
+            }
+            throw new ChannelAdapterException(ChannelAdapterException.Kind.REFUSED,
+                    "Idempotency reference was already used with a different payload.");
+        }
         state.setQuantity(quantity);
         state.setVersion(state.getVersion() + 1);
-        stateRepository.save(state);
-        if (duplicate) {
+        if (duplicate && idempotencyReference == null) {
+            // Legacy duplicate fault: model a channel that applies the write twice.
             state.setVersion(state.getVersion() + 1);
-            stateRepository.save(state);
         }
+        state.setLastIdempotencyReference(idempotencyReference);
+        state.setLastWriteQuantity(quantity);
+        stateRepository.save(state);
         return new Snapshot(state.getQuantity(), state.getVersion());
     }
 
@@ -83,6 +94,9 @@ public class SimulatorStateService {
         SimulatorListingState state = lockState(listingId);
         state.setQuantity(quantity);
         state.setVersion(state.getVersion() + 1);
+        // An external stock change invalidates the previous write's idempotency guarantee.
+        state.setLastIdempotencyReference(null);
+        state.setLastWriteQuantity(null);
         stateRepository.save(state);
         return new Snapshot(state.getQuantity(), state.getVersion());
     }

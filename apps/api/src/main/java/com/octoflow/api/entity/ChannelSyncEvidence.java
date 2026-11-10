@@ -59,6 +59,12 @@ public class ChannelSyncEvidence extends BaseEntity {
     @Column(name = "idempotency_reference", length = 128)
     private String idempotencyReference;
 
+    @Column(name = "external_listing_id", length = 128)
+    private String externalListingId;
+
+    @Column(name = "external_variant_id", length = 128)
+    private String externalVariantId;
+
     @Column(name = "observed_at", nullable = false)
     private Instant observedAt = Instant.now();
 
@@ -96,6 +102,10 @@ public class ChannelSyncEvidence extends BaseEntity {
     public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
     public String getIdempotencyReference() { return idempotencyReference; }
     public void setIdempotencyReference(String idempotencyReference) { this.idempotencyReference = idempotencyReference; }
+    public String getExternalListingId() { return externalListingId; }
+    public void setExternalListingId(String externalListingId) { this.externalListingId = externalListingId; }
+    public String getExternalVariantId() { return externalVariantId; }
+    public void setExternalVariantId(String externalVariantId) { this.externalVariantId = externalVariantId; }
     public Instant getObservedAt() { return observedAt; }
     public void setObservedAt(Instant observedAt) { this.observedAt = observedAt; }
 }

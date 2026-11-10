@@ -16,13 +16,17 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
  * Prepares and records one sync job at a time. Remote I/O is performed by the supervisor
- * between {@link #prepare(Long)} and {@link #completeSuccess}/{@link #completeFailure}.
+ * between {@link #prepare(JobClaim)} and {@link #completeSuccess}/{@link #completeFailure}.
+ * Every claim carries a fencing generation, so a worker whose lease expired can never
+ * complete a job that a newer claim owns.
  */
 @Service
 public class SyncJobProcessor {
@@ -61,12 +65,19 @@ public class SyncJobProcessor {
         this.retryMaxMs = Math.max(retryBaseMs, retryMaxMs);
     }
 
+    public record JobClaim(Long jobId, long claimGeneration) {}
+
     public record SyncJobSnapshot(Long jobId,
+                                  long claimGeneration,
                                   Long listingId,
                                   Long channelId,
                                   Long variantId,
                                   int targetQuantity,
                                   long allocationRevision,
+                                  long mappingVersion,
+                                  String externalListingId,
+                                  String externalVariantId,
+                                  String externalSku,
                                   int attempt,
                                   String adapterName,
                                   String idempotencyReference,
@@ -74,21 +85,42 @@ public class SyncJobProcessor {
                                   ChannelListing listing) {}
 
     @Transactional
-    public List<Long> claimDue(int batch, long leaseSeconds) {
+    public List<JobClaim> claimDue(int batch, long leaseSeconds) {
         List<Long> ids = jobRepository.claimDueJobIds(Math.max(1, batch));
-        if (!ids.isEmpty()) {
-            jobRepository.markProcessing(ids, workerId, Instant.now().plusSeconds(Math.max(1, leaseSeconds)));
+        if (ids.isEmpty()) {
+            return List.of();
         }
-        return ids;
+        Instant leaseUntil = Instant.now().plusSeconds(Math.max(1, leaseSeconds));
+        List<JobClaim> claims = new ArrayList<>();
+        for (Long id : ids) {
+            if (jobRepository.markProcessing(id, workerId, leaseUntil) == 1) {
+                Long generation = jobRepository.findClaimGeneration(id);
+                if (generation != null) {
+                    claims.add(new JobClaim(id, generation));
+                }
+            }
+        }
+        return claims;
     }
 
+    @Transactional(readOnly = true)
+    public Long listingIdFor(Long jobId) {
+        return jobRepository.findListingIdById(jobId);
+    }
+
+    /**
+     * Must run while the listing advisory lock is held. Re-validates ownership, target,
+     * allocation revision and mapping identity immediately before any remote I/O.
+     */
     @Transactional
-    public SyncJobSnapshot prepare(Long jobId) {
-        SyncJob job = jobRepository.findByIdForUpdate(jobId).orElse(null);
-        if (job == null || job.getStatus() != SyncJob.Status.PROCESSING) {
+    public SyncJobSnapshot prepare(JobClaim claim) {
+        Long listingId = jobRepository.findListingIdById(claim.jobId());
+        ChannelListing listing = listingId == null ? null
+                : listingRepository.findByIdForUpdate(listingId).orElse(null);
+        SyncJob job = jobRepository.findByIdForUpdate(claim.jobId()).orElse(null);
+        if (!ownedAndProcessing(job, claim)) {
             return null;
         }
-        ChannelListing listing = listingRepository.findByIdForUpdate(job.getListingId()).orElse(null);
         if (listing == null) {
             deadLetter(job, "Listing no longer exists.");
             return null;
@@ -99,12 +131,10 @@ public class SyncJobProcessor {
             return null;
         }
 
-        if (listing.getTargetAllocationRevision() > job.getAllocationRevision()
-                || listing.getAllocatedQuota() != job.getTargetQuantity()) {
+        if (targetChanged(job, listing)) {
             supersedeAndReplace(job, listing, "Target changed before delivery.");
             return null;
         }
-
         if (job.getAttempts() > job.getMaxAttempts()) {
             deadLetter(job, "Maximum attempts exceeded before delivery.");
             return null;
@@ -134,11 +164,16 @@ public class SyncJobProcessor {
 
         return new SyncJobSnapshot(
                 job.getId(),
+                claim.claimGeneration(),
                 listing.getId(),
                 channel.getId(),
                 job.getVariantId(),
                 job.getTargetQuantity(),
                 job.getAllocationRevision(),
+                listing.getMappingVersion(),
+                listing.getExternalListingId(),
+                listing.getExternalVariantId(),
+                listing.getExternalSku(),
                 job.getAttempts(),
                 adapter.name(),
                 reference,
@@ -149,15 +184,25 @@ public class SyncJobProcessor {
     @Transactional
     public void completeSuccess(SyncJobSnapshot snapshot, int remoteBefore,
                                 int sent, int acknowledged, int verified) {
+        ChannelListing listing = listingRepository.findByIdForUpdate(snapshot.listingId()).orElse(null);
         SyncJob job = jobRepository.findByIdForUpdate(snapshot.jobId()).orElse(null);
-        if (job == null || job.getStatus() != SyncJob.Status.PROCESSING) {
+        if (!ownedAndProcessing(job, claimOf(snapshot))) {
             return;
         }
-        ChannelListing listing = listingRepository.findByIdForUpdate(snapshot.listingId()).orElse(null);
-        if (listing == null
-                || listing.getTargetAllocationRevision() > job.getAllocationRevision()
-                || listing.getAllocatedQuota() != job.getTargetQuantity()) {
-            supersedeAndReplace(job, listing, "Target changed while the adapter was running.");
+        if (listing == null) {
+            deadLetter(job, "Listing no longer exists.");
+            return;
+        }
+        String staleReason = staleReason(snapshot, job, listing);
+        if (staleReason != null) {
+            // The remote write already happened, but it belongs to a superseded target or
+            // mapping. Never claim VERIFIED for the newer revision; ask reconciliation to
+            // read the channel back and queue a correction when needed.
+            evidenceRecorder.record(snapshot.listingId(), snapshot.jobId(), null, null,
+                    "INVENTORY_SYNC", snapshot.adapterName(), "UNCONFIRMED",
+                    snapshot.targetQuantity(), sent, acknowledged, verified, remoteBefore, verified,
+                    "STALE_AFTER_WRITE", staleReason, snapshot.idempotencyReference());
+            supersedeAndReplace(job, listing, staleReason);
             return;
         }
 
@@ -212,25 +257,61 @@ public class SyncJobProcessor {
     }
 
     @Transactional
-    public void completeFailure(Long jobId, ChannelAdapterException.Kind kind, String message) {
-        SyncJob job = jobRepository.findByIdForUpdate(jobId).orElse(null);
-        if (job == null || job.getStatus() != SyncJob.Status.PROCESSING) {
+    public void completeFailure(SyncJobSnapshot snapshot, ChannelAdapterException.Kind kind, String message) {
+        ChannelListing listing = listingRepository.findByIdForUpdate(snapshot.listingId()).orElse(null);
+        SyncJob job = jobRepository.findByIdForUpdate(snapshot.jobId()).orElse(null);
+        if (!ownedAndProcessing(job, claimOf(snapshot))) {
             return;
         }
-        ChannelListing listing = listingRepository.findByIdForUpdate(job.getListingId()).orElse(null);
-        Channel channel = listing != null ? listing.getChannel() : null;
-        String adapterName = channel != null ? "simulator" : "unknown";
+        fail(job, listing, kind, message, snapshot.adapterName());
+    }
 
+    @Transactional
+    public void completeFailure(JobClaim claim, ChannelAdapterException.Kind kind, String message) {
+        Long listingId = jobRepository.findListingIdById(claim.jobId());
+        ChannelListing listing = listingId == null ? null
+                : listingRepository.findByIdForUpdate(listingId).orElse(null);
+        SyncJob job = jobRepository.findByIdForUpdate(claim.jobId()).orElse(null);
+        if (!ownedAndProcessing(job, claim)) {
+            return;
+        }
+        fail(job, listing, kind, message, job.getAdapter() == null ? "unknown" : job.getAdapter());
+    }
+
+    @Transactional
+    public void releaseLease(JobClaim claim) {
+        jobRepository.releaseLease(claim.jobId(), workerId, claim.claimGeneration());
+    }
+
+    @Transactional
+    public void supersede(Long jobId, String reason) {
+        SyncJob job = jobRepository.findByIdForUpdate(jobId).orElse(null);
+        if (job == null) {
+            return;
+        }
+        job.setStatus(SyncJob.Status.SUPERSEDED);
+        job.setLastError(truncate(reason, 500));
+        job.setLeaseOwner(null);
+        job.setLeaseUntil(null);
+        jobRepository.save(job);
+    }
+
+    private void fail(SyncJob job, ChannelListing listing,
+                      ChannelAdapterException.Kind kind, String message, String adapterName) {
         String safeMessage = truncate(message, 500);
         job.setLastError(safeMessage);
         job.setAdapter(adapterName);
         boolean blocked = kind == ChannelAdapterException.Kind.UNAVAILABLE;
+        boolean uncertain = kind == ChannelAdapterException.Kind.TIMEOUT;
         boolean exhausted = job.getAttempts() >= job.getMaxAttempts();
         if (blocked) {
             job.setStatus(SyncJob.Status.BLOCKED);
+        } else if (uncertain) {
+            // A timeout may or may not have applied remotely. Never retry blindly; reconciliation
+            // reads the channel back and resolves or supersedes this job.
+            job.setStatus(SyncJob.Status.UNCONFIRMED);
         } else if (exhausted) {
-            job.setStatus(kind == ChannelAdapterException.Kind.TIMEOUT
-                    ? SyncJob.Status.UNCONFIRMED : SyncJob.Status.DEAD_LETTER);
+            job.setStatus(SyncJob.Status.DEAD_LETTER);
         } else {
             job.setStatus(SyncJob.Status.RETRY_PENDING);
             job.setNextAttemptAt(Instant.now().plusMillis(backoffMs(job.getAttempts())));
@@ -247,7 +328,7 @@ public class SyncJobProcessor {
             listingRepository.save(listing);
         }
 
-        String evidenceStatus = kind == ChannelAdapterException.Kind.TIMEOUT ? "UNCONFIRMED"
+        String evidenceStatus = uncertain ? "UNCONFIRMED"
                 : kind == ChannelAdapterException.Kind.REFUSED ? "REFUSED" : "ERROR";
         evidenceRecorder.record(job.getListingId(),
                 job.getId(),
@@ -270,26 +351,8 @@ public class SyncJobProcessor {
                 "job_id", job.getId(),
                 "listing_id", job.getListingId(),
                 "status", job.getStatus().name(),
-                "uncertain", kind == ChannelAdapterException.Kind.TIMEOUT,
+                "uncertain", uncertain,
                 "refresh_required", true));
-    }
-
-    @Transactional
-    public void releaseLease(Long jobId) {
-        jobRepository.releaseLease(jobId);
-    }
-
-    @Transactional
-    public void supersede(Long jobId, String reason) {
-        SyncJob job = jobRepository.findByIdForUpdate(jobId).orElse(null);
-        if (job == null) {
-            return;
-        }
-        job.setStatus(SyncJob.Status.SUPERSEDED);
-        job.setLastError(truncate(reason, 500));
-        job.setLeaseOwner(null);
-        job.setLeaseUntil(null);
-        jobRepository.save(job);
     }
 
     private void supersedeAndReplace(SyncJob job, ChannelListing listing, String reason) {
@@ -300,7 +363,10 @@ public class SyncJobProcessor {
         jobRepository.save(job);
         jobRepository.flush();
 
-        if (listing == null) {
+        if (listing == null
+                || !listing.isActive()
+                || listing.getMappingStatus() != ChannelListing.MappingStatus.VERIFIED
+                || listing.getMappingVerifiedAt() == null) {
             return;
         }
         boolean activeExists = jobRepository.existsByListingIdAndStatusIn(listing.getId(),
@@ -360,6 +426,35 @@ public class SyncJobProcessor {
                 "listing_id", job.getListingId(),
                 "status", job.getStatus().name(),
                 "refresh_required", true));
+    }
+
+    private boolean ownedAndProcessing(SyncJob job, JobClaim claim) {
+        return job != null
+                && job.getStatus() == SyncJob.Status.PROCESSING
+                && job.getClaimGeneration() == claim.claimGeneration()
+                && workerId.equals(job.getLeaseOwner());
+    }
+
+    private JobClaim claimOf(SyncJobSnapshot snapshot) {
+        return new JobClaim(snapshot.jobId(), snapshot.claimGeneration());
+    }
+
+    private boolean targetChanged(SyncJob job, ChannelListing listing) {
+        return listing.getTargetAllocationRevision() > job.getAllocationRevision()
+                || listing.getAllocatedQuota() != job.getTargetQuantity();
+    }
+
+    private String staleReason(SyncJobSnapshot snapshot, SyncJob job, ChannelListing listing) {
+        if (targetChanged(job, listing)) {
+            return "Target changed while the adapter was running.";
+        }
+        if (listing.getMappingVersion() != snapshot.mappingVersion()
+                || !Objects.equals(listing.getExternalListingId(), snapshot.externalListingId())
+                || !Objects.equals(listing.getExternalVariantId(), snapshot.externalVariantId())
+                || !Objects.equals(listing.getExternalSku(), snapshot.externalSku())) {
+            return "Mapping identity changed while the adapter was running.";
+        }
+        return null;
     }
 
     private long backoffMs(int attempts) {

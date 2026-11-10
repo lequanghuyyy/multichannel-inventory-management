@@ -9,10 +9,13 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
- * Supervises durable sync jobs. A job sends an absolute target, reads the remote value back,
- * and only becomes VERIFIED when that independent read matches the target.
+ * Supervises durable sync jobs. The listing advisory lock is acquired before the job snapshot
+ * is prepared, so target/revision/mapping revalidation happens under the same coordination as
+ * allocation execution. A job sends an absolute target, reads it back, and only becomes
+ * VERIFIED when that independent read matches the target.
  */
 @Service
 public class SyncJobDispatchService {
@@ -38,37 +41,43 @@ public class SyncJobDispatchService {
     }
 
     public int processDueJobs() {
-        List<Long> jobIds = processor.claimDue(batchSize, leaseSeconds);
+        List<SyncJobProcessor.JobClaim> claims = processor.claimDue(batchSize, leaseSeconds);
         int processed = 0;
-        for (Long jobId : jobIds) {
+        for (SyncJobProcessor.JobClaim claim : claims) {
             try {
-                if (processJob(jobId)) {
+                if (processJob(claim)) {
                     processed++;
                 }
             } catch (RuntimeException ex) {
-                log.error("Sync job #{} failed unexpectedly: {}", jobId, ex.getMessage(), ex);
+                log.error("Sync job #{} failed unexpectedly: {}", claim.jobId(), ex.getMessage(), ex);
                 try {
-                    processor.completeFailure(jobId, ChannelAdapterException.Kind.PROTOCOL,
+                    processor.completeFailure(claim, ChannelAdapterException.Kind.PROTOCOL,
                             "Unexpected sync worker error: " + ex.getMessage());
                 } catch (RuntimeException nested) {
-                    log.error("Unable to record sync job failure #{}: {}", jobId, nested.getMessage(), nested);
+                    log.error("Unable to record sync job failure #{}: {}", claim.jobId(),
+                            nested.getMessage(), nested);
                 }
             }
         }
         return processed;
     }
 
-    public boolean processJob(Long jobId) {
-        SyncJobProcessor.SyncJobSnapshot snapshot = processor.prepare(jobId);
-        if (snapshot == null) {
+    public boolean processJob(SyncJobProcessor.JobClaim claim) {
+        Long listingId = processor.listingIdFor(claim.jobId());
+        if (listingId == null) {
+            processor.releaseLease(claim);
             return false;
         }
-        boolean acquired = listingLeaseService.tryWithLock(snapshot.listingId(), () -> execute(snapshot));
-        if (!acquired) {
-            processor.releaseLease(jobId);
+        Optional<Boolean> result = listingLeaseService.tryCallWithLock(listingId, () -> {
+            SyncJobProcessor.SyncJobSnapshot snapshot = processor.prepare(claim);
+            return snapshot != null && execute(snapshot);
+        });
+        if (result.isEmpty()) {
+            // Another worker owns the listing; hand the claim back without touching a newer claim.
+            processor.releaseLease(claim);
             return false;
         }
-        return true;
+        return result.get();
     }
 
     private boolean execute(SyncJobProcessor.SyncJobSnapshot snapshot) {
@@ -76,7 +85,7 @@ public class SyncJobDispatchService {
         try {
             adapter = adapterRouter.require(snapshot.channel());
         } catch (ChannelAdapterException ex) {
-            processor.completeFailure(snapshot.jobId(), ex.getKind(), ex.getMessage());
+            processor.completeFailure(snapshot, ex.getKind(), ex.getMessage());
             return true;
         }
         try {
@@ -90,9 +99,9 @@ public class SyncJobDispatchService {
             processor.completeSuccess(snapshot, before.quantity(),
                     receipt.sentQuantity(), receipt.acknowledgedQuantity(), after.quantity());
         } catch (ChannelAdapterException ex) {
-            processor.completeFailure(snapshot.jobId(), ex.getKind(), ex.getMessage());
+            processor.completeFailure(snapshot, ex.getKind(), ex.getMessage());
         } catch (RuntimeException ex) {
-            processor.completeFailure(snapshot.jobId(), ChannelAdapterException.Kind.PROTOCOL,
+            processor.completeFailure(snapshot, ChannelAdapterException.Kind.PROTOCOL,
                     "Unexpected adapter error: " + ex.getMessage());
         }
         return true;

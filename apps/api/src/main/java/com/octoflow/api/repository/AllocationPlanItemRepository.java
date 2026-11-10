@@ -1,5 +1,6 @@
 package com.octoflow.api.repository;
 
+import com.octoflow.api.entity.AllocationPlan;
 import com.octoflow.api.entity.AllocationPlanItem;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -30,4 +31,16 @@ public interface AllocationPlanItemRepository extends JpaRepository<AllocationPl
     Optional<AllocationPlanItem> findByIdForUpdate(@Param("id") Long id);
 
     long countByPlanIdAndStatusIn(Long planId, Collection<AllocationPlanItem.Status> statuses);
+
+    @Query("""
+            SELECT CASE WHEN COUNT(i) > 0 THEN true ELSE false END
+            FROM AllocationPlanItem i, AllocationPlan p
+            WHERE i.planId = p.id
+              AND i.listingId = :listingId
+              AND p.status = :planStatus
+              AND i.status IN :itemStatuses
+            """)
+    boolean existsActiveForListing(@Param("listingId") Long listingId,
+                                   @Param("planStatus") AllocationPlan.Status planStatus,
+                                   @Param("itemStatuses") Collection<AllocationPlanItem.Status> itemStatuses);
 }

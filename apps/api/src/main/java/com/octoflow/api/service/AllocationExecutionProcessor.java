@@ -5,24 +5,32 @@ import com.octoflow.api.entity.AllocationPlan;
 import com.octoflow.api.entity.AllocationPlanItem;
 import com.octoflow.api.entity.Channel;
 import com.octoflow.api.entity.ChannelListing;
+import com.octoflow.api.entity.InventoryBalance;
 import com.octoflow.api.entity.ProductVariant;
+import com.octoflow.api.entity.VariantAllocationState;
 import com.octoflow.api.repository.AllocationPlanItemRepository;
 import com.octoflow.api.repository.AllocationPlanRepository;
 import com.octoflow.api.repository.ChannelListingRepository;
-import com.octoflow.api.repository.ChannelRepository;
+import com.octoflow.api.repository.InventoryBalanceRepository;
+import com.octoflow.api.repository.VariantAllocationStateRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
  * Executes one allocation plan step per transaction. Adapter I/O happens between the prepare
  * and apply transactions, never while a database transaction is open. A plan is only completed
- * when every item has a verified read-back; any blocked decrease keeps all increases pending.
+ * when every item has a verified read-back. Before every INCREASE the current core version,
+ * allocation revision and available-to-sell budget are re-read; if the plan is no longer safe,
+ * remaining increases are blocked while already selected DECREASE steps keep running.
  */
 @Service
 public class AllocationExecutionProcessor {
@@ -30,7 +38,8 @@ public class AllocationExecutionProcessor {
     private final AllocationPlanRepository planRepository;
     private final AllocationPlanItemRepository itemRepository;
     private final ChannelListingRepository listingRepository;
-    private final ChannelRepository channelRepository;
+    private final InventoryBalanceRepository balanceRepository;
+    private final VariantAllocationStateRepository stateRepository;
     private final ChannelDeliveryEligibility eligibility;
     private final ChannelEvidenceRecorder evidenceRecorder;
     private final SyncEventBroadcaster broadcaster;
@@ -43,7 +52,8 @@ public class AllocationExecutionProcessor {
     public AllocationExecutionProcessor(AllocationPlanRepository planRepository,
                                         AllocationPlanItemRepository itemRepository,
                                         ChannelListingRepository listingRepository,
-                                        ChannelRepository channelRepository,
+                                        InventoryBalanceRepository balanceRepository,
+                                        VariantAllocationStateRepository stateRepository,
                                         ChannelDeliveryEligibility eligibility,
                                         ChannelEvidenceRecorder evidenceRecorder,
                                         SyncEventBroadcaster broadcaster,
@@ -54,7 +64,8 @@ public class AllocationExecutionProcessor {
         this.planRepository = planRepository;
         this.itemRepository = itemRepository;
         this.listingRepository = listingRepository;
-        this.channelRepository = channelRepository;
+        this.balanceRepository = balanceRepository;
+        this.stateRepository = stateRepository;
         this.eligibility = eligibility;
         this.evidenceRecorder = evidenceRecorder;
         this.broadcaster = broadcaster;
@@ -65,7 +76,10 @@ public class AllocationExecutionProcessor {
         this.retryMaxMs = Math.max(retryBaseMs, retryMaxMs);
     }
 
+    public record PlanClaim(Long planId, long claimGeneration) {}
+
     public record PlanAction(Long planId,
+                             long claimGeneration,
                              Long itemId,
                              Long listingId,
                              Long channelId,
@@ -76,25 +90,47 @@ public class AllocationExecutionProcessor {
                              Channel channel,
                              ChannelListing listing,
                              long allocationRevision,
+                             long mappingVersion,
+                             String externalListingId,
+                             String externalVariantId,
                              int attempt) {}
 
     @Transactional
-    public List<Long> claimDuePlans(int batch) {
+    public List<PlanClaim> claimDuePlans(int batch) {
         List<Long> ids = planRepository.claimDuePlanIds(Math.max(1, batch));
-        if (!ids.isEmpty()) {
-            planRepository.leasePlans(ids, workerId, Instant.now().plusSeconds(leaseSeconds));
+        List<PlanClaim> claims = new ArrayList<>();
+        Instant leaseUntil = Instant.now().plusSeconds(leaseSeconds);
+        for (Long id : ids) {
+            claim(id, leaseUntil).ifPresent(claims::add);
         }
-        return ids;
+        return claims;
+    }
+
+    /**
+     * Claims one plan directly. Used by the supervisor when it already selected the plan and by
+     * tests that drive a single plan.
+     */
+    @Transactional
+    public Optional<PlanClaim> claimPlan(Long planId) {
+        return claim(planId, Instant.now().plusSeconds(leaseSeconds));
+    }
+
+    private Optional<PlanClaim> claim(Long planId, Instant leaseUntil) {
+        if (planRepository.leasePlan(planId, workerId, leaseUntil) != 1) {
+            return Optional.empty();
+        }
+        Long generation = planRepository.findClaimGeneration(planId);
+        return generation == null ? Optional.empty() : Optional.of(new PlanClaim(planId, generation));
     }
 
     @Transactional
-    public PlanAction prepareNextAction(Long planId) {
-        AllocationPlan plan = planRepository.findByIdForUpdate(planId).orElse(null);
-        if (plan == null || plan.getStatus() != AllocationPlan.Status.APPLYING) {
+    public PlanAction prepareNextAction(PlanClaim claim) {
+        AllocationPlan plan = planRepository.findByIdForUpdate(claim.planId()).orElse(null);
+        if (!ownedAndApplying(plan, claim)) {
             return null;
         }
 
-        List<AllocationPlanItem> items = itemRepository.findByPlanIdOrderByChannelIdAscIdAsc(planId);
+        List<AllocationPlanItem> items = itemRepository.findByPlanIdOrderByChannelIdAscIdAsc(claim.planId());
         boolean changed = false;
         for (AllocationPlanItem item : items) {
             if (item.getDirection() == AllocationPlanItem.Direction.NONE
@@ -118,10 +154,10 @@ public class AllocationExecutionProcessor {
         if (!pendingDecreases.isEmpty()) {
             AllocationPlanItem due = firstDue(pendingDecreases);
             if (due == null) {
-                planRepository.releaseLease(planId);
+                releaseOwnLease(plan, claim);
                 return null;
             }
-            return prepareItem(plan, due);
+            return prepareItem(plan, claim, due);
         }
 
         List<AllocationPlanItem> decreases = items.stream()
@@ -132,30 +168,35 @@ public class AllocationExecutionProcessor {
             if (decreases.stream().anyMatch(item -> item.getStatus() == AllocationPlanItem.Status.BLOCKED)) {
                 blockPlan(plan, "Có kênh giảm quota chưa được xác minh.");
             } else {
-                planRepository.releaseLease(planId);
+                releaseOwnLease(plan, claim);
             }
             return null;
         }
 
         List<AllocationPlanItem> pendingIncreases = pending(items, AllocationPlanItem.Direction.INCREASE);
         if (!pendingIncreases.isEmpty()) {
-            AllocationPlanItem due = firstDue(pendingIncreases);
-            if (due == null) {
-                planRepository.releaseLease(planId);
+            String stale = increaseBudgetIssue(plan);
+            if (stale != null) {
+                blockPendingIncreases(plan, items, stale, "ALLOCATION_BUDGET_STALE");
                 return null;
             }
-            return prepareItem(plan, due);
+            AllocationPlanItem due = firstDue(pendingIncreases);
+            if (due == null) {
+                releaseOwnLease(plan, claim);
+                return null;
+            }
+            return prepareItem(plan, claim, due);
         }
 
         if (changed || items.stream().allMatch(item -> item.getStatus() == AllocationPlanItem.Status.VERIFIED)) {
             finishPlan(plan, items);
         } else {
-            planRepository.releaseLease(planId);
+            releaseOwnLease(plan, claim);
         }
         return null;
     }
 
-    private PlanAction prepareItem(AllocationPlan plan, AllocationPlanItem item) {
+    private PlanAction prepareItem(AllocationPlan plan, PlanClaim claim, AllocationPlanItem item) {
         if (item.getAttempts() >= maxAttempts) {
             blockItemAndPlan(plan, item, "Đã vượt số lần thử tối đa (" + maxAttempts + ").",
                     ChannelAdapterException.Kind.TIMEOUT.name());
@@ -190,6 +231,7 @@ public class AllocationExecutionProcessor {
                 + ":target:" + item.getProposedQuota();
         return new PlanAction(
                 plan.getId(),
+                claim.claimGeneration(),
                 item.getId(),
                 listing.getId(),
                 channel.getId(),
@@ -200,18 +242,38 @@ public class AllocationExecutionProcessor {
                 snapshotChannel(channel),
                 snapshotListing(listing, channel),
                 plan.getAllocationRevision(),
+                listing.getMappingVersion(),
+                listing.getExternalListingId(),
+                listing.getExternalVariantId(),
                 item.getAttempts());
     }
 
     @Transactional
     public void applySuccess(PlanAction action, int remoteBefore, int sent, int acknowledged, int verified) {
         AllocationPlan plan = planRepository.findByIdForUpdate(action.planId()).orElse(null);
-        if (plan == null || plan.getStatus() != AllocationPlan.Status.APPLYING) {
+        if (!ownedAndApplying(plan, new PlanClaim(action.planId(), action.claimGeneration()))) {
             return;
         }
         AllocationPlanItem item = itemRepository.findByIdForUpdate(action.itemId()).orElse(null);
         if (item == null || item.getStatus() != AllocationPlanItem.Status.PENDING
                 && item.getStatus() != AllocationPlanItem.Status.RETRY_PENDING) {
+            return;
+        }
+
+        ChannelListing listing = listingRepository.findByIdForUpdate(item.getListingId()).orElse(null);
+        if (listing == null) {
+            blockItemAndPlan(plan, item, "Listing không còn tồn tại sau khi ghi.", "PREFLIGHT");
+            return;
+        }
+        if (mappingChanged(action, listing)) {
+            evidenceRecorder.record(listing.getId(), null, plan.getId(), item.getId(),
+                    "ALLOCATION_" + item.getDirection().name(), "simulator", "UNCONFIRMED",
+                    item.getProposedQuota(), sent, acknowledged, verified, remoteBefore, verified,
+                    "MAPPING_CHANGED_DURING_WRITE",
+                    "Mapping identity changed while the allocation step was running.", action.idempotencyReference());
+            blockItemAndPlan(plan, item,
+                    "Mapping đã thay đổi trong lúc ghi; kết quả remote cần đối soát.",
+                    "MAPPING_CHANGED_DURING_WRITE");
             return;
         }
 
@@ -226,7 +288,6 @@ public class AllocationExecutionProcessor {
         item.setNextAttemptAt(null);
         itemRepository.save(item);
 
-        ChannelListing listing = listingRepository.findByIdForUpdate(item.getListingId()).orElse(null);
         if (listing != null && item.getDirection() != AllocationPlanItem.Direction.NONE) {
             listing.setAllocatedQuota(item.getProposedQuota());
             listing.setReportedStock(verified);
@@ -260,12 +321,21 @@ public class AllocationExecutionProcessor {
                 action.idempotencyReference());
 
         List<AllocationPlanItem> items = itemRepository.findByPlanIdOrderByChannelIdAscIdAsc(plan.getId());
-        if (items.stream().anyMatch(row -> row.getStatus() == AllocationPlanItem.Status.BLOCKED)) {
+        if (item.getDirection() == AllocationPlanItem.Direction.INCREASE && publishedTotalExceedsAts(plan)) {
+            // A sale or reservation landed while the adapter was running. The write itself is
+            // verified, but no further increase may be published against the smaller budget.
+            listing.setSyncStatus(ChannelListing.SyncStatus.OUT_OF_SYNC);
+            listing.setLastSyncError("ATS dropped below the published allocation total; reconciliation required.");
+            listingRepository.save(listing);
+            blockPendingIncreases(plan, items,
+                    "ATS hiện tại thấp hơn tổng quota đã công bố; cần đối soát và giảm tồn.",
+                    "ALLOCATION_ATS_STALE");
+        } else if (items.stream().anyMatch(row -> row.getStatus() == AllocationPlanItem.Status.BLOCKED)) {
             blockPlan(plan, "Có item bị chặn trong kế hoạch.");
         } else if (items.stream().allMatch(row -> row.getStatus() == AllocationPlanItem.Status.VERIFIED)) {
             finishPlan(plan, items);
         } else {
-            planRepository.releaseLease(plan.getId());
+            releaseOwnLease(plan, new PlanClaim(action.planId(), action.claimGeneration()));
         }
         broadcaster.broadcastAfterCommit("ALLOCATION_STATE_CHANGED", Map.of(
                 "plan_id", plan.getId(),
@@ -278,7 +348,7 @@ public class AllocationExecutionProcessor {
     @Transactional
     public void applyFailure(PlanAction action, ChannelAdapterException.Kind kind, String message) {
         AllocationPlan plan = planRepository.findByIdForUpdate(action.planId()).orElse(null);
-        if (plan == null || plan.getStatus() != AllocationPlan.Status.APPLYING) {
+        if (!ownedAndApplying(plan, new PlanClaim(action.planId(), action.claimGeneration()))) {
             return;
         }
         AllocationPlanItem item = itemRepository.findByIdForUpdate(action.itemId()).orElse(null);
@@ -323,7 +393,7 @@ public class AllocationExecutionProcessor {
         } else {
             plan.setLastError(safeMessage);
             planRepository.save(plan);
-            planRepository.releaseLease(plan.getId());
+            releaseOwnLease(plan, new PlanClaim(action.planId(), action.claimGeneration()));
         }
         broadcaster.broadcastAfterCommit("ALLOCATION_STATE_CHANGED", Map.of(
                 "plan_id", plan.getId(),
@@ -335,8 +405,76 @@ public class AllocationExecutionProcessor {
     }
 
     @Transactional
-    public void releaseLease(Long planId) {
-        planRepository.releaseLease(planId);
+    public void releaseLease(PlanClaim claim) {
+        planRepository.releaseLease(claim.planId(), workerId, claim.claimGeneration());
+    }
+
+    private boolean ownedAndApplying(AllocationPlan plan, PlanClaim claim) {
+        return plan != null
+                && plan.getStatus() == AllocationPlan.Status.APPLYING
+                && plan.getClaimGeneration() == claim.claimGeneration()
+                && workerId.equals(plan.getLeaseOwner());
+    }
+
+    /**
+     * Re-reads the live budget before any INCREASE. Locks are taken in plan -> balance -> state
+     * order, matching confirm, so concurrent POS/reservation writes cannot be missed by the
+     * budget decision.
+     */
+    private String increaseBudgetIssue(AllocationPlan plan) {
+        InventoryBalance balance = balanceRepository.findByVariantIdWithLock(plan.getVariantId()).orElse(null);
+        if (balance == null) {
+            return "Không đọc được số dư tồn kho hiện tại.";
+        }
+        if (plan.getCoreVersion() == null || !plan.getCoreVersion().equals(balance.getVersion())) {
+            return "Core version tồn kho đã thay đổi kể từ lúc confirm; dừng các bước tăng quota.";
+        }
+        VariantAllocationState state = stateRepository.findByVariantIdWithLock(plan.getVariantId()).orElse(null);
+        if (state == null || state.getCurrentRevision() != plan.getAllocationRevision()) {
+            return "Allocation revision đã thay đổi kể từ lúc confirm; dừng các bước tăng quota.";
+        }
+        if (plan.getTotalTarget() > balance.getAvailableToSell()) {
+            return "ATS hiện tại " + balance.getAvailableToSell()
+                    + " thấp hơn tổng quota kế hoạch " + plan.getTotalTarget()
+                    + "; dừng các bước tăng quota.";
+        }
+        return null;
+    }
+
+    private boolean publishedTotalExceedsAts(AllocationPlan plan) {
+        // Plain read: applySuccess already holds the listing row; locking the balance here would
+        // invert the plan -> balance -> listing order used by confirm.
+        return balanceRepository.findByVariantId(plan.getVariantId())
+                .map(balance -> plan.getTotalTarget() > balance.getAvailableToSell())
+                .orElse(false);
+    }
+
+    private boolean mappingChanged(PlanAction action, ChannelListing listing) {
+        return listing.getMappingVersion() != action.mappingVersion()
+                || !Objects.equals(listing.getExternalListingId(), action.externalListingId())
+                || !Objects.equals(listing.getExternalVariantId(), action.externalVariantId());
+    }
+
+    private void blockPendingIncreases(AllocationPlan plan, List<AllocationPlanItem> items,
+                                       String reason, String errorCode) {
+        for (AllocationPlanItem item : items) {
+            if (item.getDirection() != AllocationPlanItem.Direction.INCREASE) {
+                continue;
+            }
+            if (item.getStatus() != AllocationPlanItem.Status.PENDING
+                    && item.getStatus() != AllocationPlanItem.Status.RETRY_PENDING) {
+                continue;
+            }
+            item.setStatus(AllocationPlanItem.Status.BLOCKED);
+            item.setLastError(truncate(reason, 500));
+            item.setNextAttemptAt(null);
+            itemRepository.save(item);
+            evidenceRecorder.record(item.getListingId(), null, plan.getId(), item.getId(),
+                    "ALLOCATION_INCREASE", "simulator", "ERROR", item.getProposedQuota(),
+                    item.getSentQuantity(), item.getAcknowledgedQuantity(), item.getVerifiedQuantity(),
+                    item.getRemoteBefore(), item.getRemoteAfter(), errorCode, reason, null);
+        }
+        blockPlan(plan, reason);
     }
 
     private List<AllocationPlanItem> pending(List<AllocationPlanItem> items,
@@ -405,6 +543,10 @@ public class AllocationExecutionProcessor {
                 reason,
                 null);
         blockPlan(plan, reason);
+    }
+
+    private void releaseOwnLease(AllocationPlan plan, PlanClaim claim) {
+        planRepository.releaseLease(plan.getId(), workerId, claim.claimGeneration());
     }
 
     private Channel snapshotChannel(Channel channel) {

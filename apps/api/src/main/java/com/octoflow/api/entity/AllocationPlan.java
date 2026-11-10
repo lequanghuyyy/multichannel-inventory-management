@@ -75,6 +75,9 @@ public class AllocationPlan extends BaseEntity {
     @Column(name = "lease_until")
     private Instant leaseUntil;
 
+    @Column(name = "claim_generation", nullable = false)
+    private long claimGeneration;
+
     public enum Status {
         PROJECTED, APPLYING, COMPLETED, BLOCKED, SUPERSEDED
     }
@@ -123,4 +126,6 @@ public class AllocationPlan extends BaseEntity {
     public void setLeaseOwner(String leaseOwner) { this.leaseOwner = leaseOwner; }
     public Instant getLeaseUntil() { return leaseUntil; }
     public void setLeaseUntil(Instant leaseUntil) { this.leaseUntil = leaseUntil; }
+    public long getClaimGeneration() { return claimGeneration; }
+    public void setClaimGeneration(long claimGeneration) { this.claimGeneration = claimGeneration; }
 }

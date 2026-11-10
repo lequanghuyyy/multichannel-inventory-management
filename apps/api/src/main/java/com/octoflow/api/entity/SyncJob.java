@@ -54,6 +54,9 @@ public class SyncJob extends BaseEntity {
     @Column(name = "lease_until")
     private Instant leaseUntil;
 
+    @Column(name = "claim_generation", nullable = false)
+    private long claimGeneration;
+
     @Column(name = "sent_quantity")
     private Integer sentQuantity;
 
@@ -119,6 +122,8 @@ public class SyncJob extends BaseEntity {
     public void setLeaseOwner(String leaseOwner) { this.leaseOwner = leaseOwner; }
     public Instant getLeaseUntil() { return leaseUntil; }
     public void setLeaseUntil(Instant leaseUntil) { this.leaseUntil = leaseUntil; }
+    public long getClaimGeneration() { return claimGeneration; }
+    public void setClaimGeneration(long claimGeneration) { this.claimGeneration = claimGeneration; }
     public Integer getSentQuantity() { return sentQuantity; }
     public void setSentQuantity(Integer sentQuantity) { this.sentQuantity = sentQuantity; }
     public Integer getAcknowledgedQuantity() { return acknowledgedQuantity; }

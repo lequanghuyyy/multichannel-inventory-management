@@ -67,6 +67,37 @@ public class SyncJobManagementService {
         SyncJob job = jobRepository.findById(jobId)
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.SYNC_JOB_NOT_FOUND,
                         "Không tìm thấy sync job #" + jobId));
+        if (job.getStatus() == SyncJob.Status.SUPERSEDED) {
+            throw new BusinessRuleException(ErrorCode.SYNC_RETRY_NOT_ALLOWED,
+                    "Sync job #" + jobId + " đã bị thay thế bởi một target mới và không được thử lại.");
+        }
+        if (job.getStatus() == SyncJob.Status.UNCONFIRMED) {
+            throw new BusinessRuleException(ErrorCode.SYNC_RETRY_NOT_ALLOWED,
+                    "Sync job #" + jobId + " có kết quả remote chưa xác nhận; hãy đối soát trước khi thử lại.");
+        }
+
+        ChannelListing listing = listingRepository.findByChannelIdAndIdForUpdate(job.getChannelId(), job.getListingId())
+                .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.MAPPING_NOT_FOUND,
+                        "Không tìm thấy liên kết #" + job.getListingId()));
+        if (!listing.isActive()
+                || listing.getMappingStatus() != ChannelListing.MappingStatus.VERIFIED
+                || listing.getMappingVerifiedAt() == null) {
+            throw new BusinessRuleException(ErrorCode.SYNC_RETRY_NOT_ALLOWED,
+                    "Mapping của listing chưa được xác minh; không thể thử lại sync job.");
+        }
+        if (listing.getAllocatedQuota() != job.getTargetQuantity()
+                || listing.getTargetAllocationRevision() != job.getAllocationRevision()) {
+            throw new BusinessRuleException(ErrorCode.SYNC_RETRY_NOT_ALLOWED,
+                    "Target hoặc allocation revision đã thay đổi; một job mới sẽ giao giá trị hiện tại.");
+        }
+        boolean otherActive = jobRepository.existsByListingIdAndStatusInAndIdNot(listing.getId(),
+                List.of(SyncJob.Status.PENDING, SyncJob.Status.PROCESSING, SyncJob.Status.RETRY_PENDING),
+                jobId);
+        if (otherActive) {
+            throw new BusinessRuleException(ErrorCode.SYNC_RETRY_NOT_ALLOWED,
+                    "Listing đang có một sync job khác chưa kết thúc; không thể thử lại.");
+        }
+
         int reset = jobRepository.resetForRetry(jobId);
         if (reset == 0) {
             throw new BusinessRuleException(ErrorCode.SYNC_RETRY_NOT_ALLOWED,

@@ -49,7 +49,8 @@ public class SimulatorChannelAdapter implements ChannelInventoryAdapter {
         }
 
         boolean duplicate = fault == SimulatorFault.FaultType.DUPLICATE;
-        SimulatorStateService.Snapshot applied = stateService.applyWrite(listing.getId(), targetQuantity, duplicate);
+        SimulatorStateService.Snapshot applied = stateService.applyWrite(
+                listing.getId(), targetQuantity, duplicate, idempotencyReference);
 
         if (fault == SimulatorFault.FaultType.TIMEOUT_AFTER_WRITE) {
             throw new ChannelAdapterException(ChannelAdapterException.Kind.TIMEOUT,

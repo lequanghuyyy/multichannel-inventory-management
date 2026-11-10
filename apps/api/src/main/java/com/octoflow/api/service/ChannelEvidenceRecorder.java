@@ -37,6 +37,31 @@ public class ChannelEvidenceRecorder {
                                       String errorCode,
                                       String errorMessage,
                                       String idempotencyReference) {
+        return record(listingId, jobId, planId, planItemId, kind, adapter, status,
+                targetQuantity, sentQuantity, acknowledgedQuantity, verifiedQuantity,
+                remoteBefore, remoteAfter, errorCode, errorMessage, idempotencyReference,
+                null, null);
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public ChannelSyncEvidence record(Long listingId,
+                                      Long jobId,
+                                      Long planId,
+                                      Long planItemId,
+                                      String kind,
+                                      String adapter,
+                                      String status,
+                                      Integer targetQuantity,
+                                      Integer sentQuantity,
+                                      Integer acknowledgedQuantity,
+                                      Integer verifiedQuantity,
+                                      Integer remoteBefore,
+                                      Integer remoteAfter,
+                                      String errorCode,
+                                      String errorMessage,
+                                      String idempotencyReference,
+                                      String externalListingId,
+                                      String externalVariantId) {
         ChannelSyncEvidence evidence = new ChannelSyncEvidence();
         evidence.setListingId(listingId);
         evidence.setJobId(jobId);
@@ -54,6 +79,8 @@ public class ChannelEvidenceRecorder {
         evidence.setErrorCode(errorCode);
         evidence.setErrorMessage(truncate(errorMessage, 500));
         evidence.setIdempotencyReference(idempotencyReference);
+        evidence.setExternalListingId(externalListingId);
+        evidence.setExternalVariantId(externalVariantId);
         evidence.setObservedAt(Instant.now());
         return repository.save(evidence);
     }

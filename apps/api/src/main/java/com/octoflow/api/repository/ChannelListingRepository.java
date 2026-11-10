@@ -1,6 +1,7 @@
 package com.octoflow.api.repository;
 
 import com.octoflow.api.entity.ChannelListing;
+import com.octoflow.api.entity.SyncJob;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -31,11 +32,24 @@ public interface ChannelListingRepository extends JpaRepository<ChannelListing, 
             SELECT l.id FROM ChannelListing l
             WHERE l.active = true
               AND l.mappingStatus = :mappingStatus
-              AND l.allocatedQuota > 0
+              AND (
+                  l.allocatedQuota > 0
+                  OR l.reportedStock > 0
+                  OR (l.verifiedQuantity IS NOT NULL AND l.verifiedQuantity > 0)
+                  OR l.syncStatus IN :problemStatuses
+                  OR (l.allocatedQuota = 0
+                      AND (l.lastVerifiedAt IS NULL OR l.verifiedQuantity IS NULL OR l.verifiedQuantity <> 0))
+                  OR EXISTS (
+                      SELECT j.id FROM SyncJob j
+                      WHERE j.listingId = l.id AND j.status IN :unresolvedStatuses)
+              )
             ORDER BY COALESCE(l.lastVerifiedAt, l.createdAt) ASC, l.id ASC
             """)
-    List<Long> findReconciliationCandidateIds(@Param("mappingStatus") ChannelListing.MappingStatus mappingStatus,
-                                              Pageable pageable);
+    List<Long> findReconciliationCandidateIds(
+            @Param("mappingStatus") ChannelListing.MappingStatus mappingStatus,
+            @Param("problemStatuses") Collection<ChannelListing.SyncStatus> problemStatuses,
+            @Param("unresolvedStatuses") Collection<SyncJob.Status> unresolvedStatuses,
+            Pageable pageable);
 
     Optional<ChannelListing> findByChannelIdAndId(Long channelId, Long id);
 
@@ -62,6 +76,11 @@ public interface ChannelListingRepository extends JpaRepository<ChannelListing, 
                                                            @Param("id") Long id);
 
     Optional<ChannelListing> findByChannelIdAndVariantId(Long channelId, Long variantId);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT l FROM ChannelListing l WHERE l.channel.id = :channelId AND l.variant.id = :variantId")
+    Optional<ChannelListing> findByChannelIdAndVariantIdForUpdate(@Param("channelId") Long channelId,
+                                                                  @Param("variantId") Long variantId);
 
     boolean existsByVariantIdIn(Collection<Long> variantIds);
 
