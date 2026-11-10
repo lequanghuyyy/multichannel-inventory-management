@@ -13,7 +13,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-@SpringBootTest
+@SpringBootTest(properties = "app.sync.workers-enabled=false")
 @ActiveProfiles("dev")
 @Testcontainers
 class DevelopmentSeedIntegrationTest {

@@ -89,7 +89,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@SpringBootTest
+@SpringBootTest(properties = "app.sync.workers-enabled=false")
 @AutoConfigureMockMvc
 @Testcontainers
 class FoundationPostgresIntegrationTest {
@@ -130,7 +130,7 @@ class FoundationPostgresIntegrationTest {
 
     @Test
     void cleanPostgresRunsAllMigrationsAndJPAValidatesTheSchema() {
-        assertEquals(7, flyway.info().applied().length);
+        assertEquals(8, flyway.info().applied().length);
         assertTrue(jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'idempotency_records'", Integer.class) == 1);
         assertTrue(jdbcTemplate.queryForObject(
@@ -155,6 +155,26 @@ class FoundationPostgresIntegrationTest {
                 "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'orders' AND column_name = 'hold_expires_at'", Integer.class) == 1);
         assertTrue(jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'receipt_event_items'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'allocation_plans'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'allocation_plan_items'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'variant_allocation_states'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'sync_jobs'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'channel_sync_evidence'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'simulator_listing_states'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'channel_listings' AND column_name = 'mapping_status'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'outbox_events' AND column_name = 'lease_until'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_allocation_plan_active_variant'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_sync_job_active_listing'", Integer.class) == 1);
         assertEquals(0, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM users", Integer.class));
     }
 

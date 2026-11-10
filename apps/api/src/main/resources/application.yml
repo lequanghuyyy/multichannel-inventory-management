@@ -100,8 +100,20 @@ app:
   sync:
     mode: ${INVENTORY_SYNC_MODE:eda}
     poll-interval-ms: 5000
-    outbox-batch-size: 100
-    reconciliation-interval-minutes: 1
+    workers-enabled: ${SYNC_WORKERS_ENABLED:true}
+    outbox-batch-size: ${SYNC_OUTBOX_BATCH_SIZE:100}
+    outbox-poll-interval-ms: ${SYNC_OUTBOX_POLL_INTERVAL_MS:1000}
+    allocation-batch-size: ${SYNC_ALLOCATION_BATCH_SIZE:25}
+    allocation-poll-interval-ms: ${SYNC_ALLOCATION_POLL_INTERVAL_MS:1000}
+    allocation-max-attempts: ${SYNC_ALLOCATION_MAX_ATTEMPTS:5}
+    job-batch-size: ${SYNC_JOB_BATCH_SIZE:50}
+    job-poll-interval-ms: ${SYNC_JOB_POLL_INTERVAL_MS:1000}
+    reconciliation-batch-size: ${SYNC_RECONCILIATION_BATCH_SIZE:50}
+    reconciliation-interval-ms: ${SYNC_RECONCILIATION_INTERVAL_MS:60000}
+    max-attempts: ${SYNC_MAX_ATTEMPTS:8}
+    retry-base-ms: ${SYNC_RETRY_BASE_MS:500}
+    retry-max-ms: ${SYNC_RETRY_MAX_MS:60000}
+    lease-seconds: ${SYNC_LEASE_SECONDS:30}
 
   channels:
     shopify:
@@ -117,7 +129,7 @@ app:
       enabled: ${EBAY_ENABLED:false}
       environment: ${EBAY_ENVIRONMENT:sandbox}
     simulator:
-      enabled: ${ORDER_LOAD_ENABLED:false}
+      enabled: ${CHANNEL_SIMULATOR_ENABLED:false}
 
   ai:
     forecast-url: ${AI_FORECAST_URL:http://127.0.0.1:8090}
