@@ -1,0 +1,18 @@
+import type { SyncFixture } from '../features/sync/sync.types';
+
+export const syncFixture: SyncFixture = {
+  events: [
+    { id: 'EV-90241', correlationId: 'corr-pos-90241', timestamp: '10:32:18', sku: 'SHOE-001-BLK-42', product: 'AeroGlide Runner · 42', brand: 'Apex Kinetic', channel: 'shopee', source: 'Quầy bán hàng số 2', destination: 'Shopee (thử nghiệm)', kind: 'inventory_changed', atsDisplay: '8 → 7 · giảm 1', latencyDisplay: '1,2 giây (mẫu)', status: 'confirmed', health: 'optimal', evidence: 'Thay đổi tồn kho mẫu. Chưa có xác nhận nào từ sàn thật.' },
+    { id: 'EV-90240', correlationId: 'corr-tt-90240', timestamp: '10:31:55', sku: 'BAG-TOT-TAN-01', product: 'Túi tote da', brand: 'Apex Goods', channel: 'tiktok', source: 'TikTok Shop', destination: 'Kho trung tâm', kind: 'order_reserved', atsDisplay: '10 → 9 · giảm 1', latencyDisplay: '0,92 giây (mẫu)', status: 'confirmed', health: 'optimal', evidence: 'Sự kiện giữ hàng mẫu, không gắn với đơn hàng thật.' },
+    { id: 'EV-90238', correlationId: 'corr-lz-90238', timestamp: '10:30:42', sku: 'SHOE-001-CRM-39', product: 'AeroGlide Runner · 39', brand: 'Apex Kinetic', channel: 'lazada', source: 'Kho hàng', destination: 'Lazada', kind: 'buffer_adjusted', atsDisplay: '4 → 2 · giảm 2', latencyDisplay: '1,4 giây (mẫu)', status: 'processing', health: 'optimal', evidence: 'Điều chỉnh tồn đệm mẫu. Chưa có tiến trình nền xử lý.' },
+    { id: 'EV-90235', correlationId: 'corr-pos-90235', timestamp: '10:29:10', sku: 'SHOE-OXF-BRN-41', product: 'Oxford Derbies · 41', brand: 'Apex Goods', channel: 'pos', source: 'Quầy bán hàng số 1', destination: 'Shopee (thử nghiệm)', kind: 'stock_depleted', atsDisplay: '1 → 0 · giảm 1', latencyDisplay: '2,8 giây (mẫu)', status: 'conflict', health: 'discrepancy', evidence: 'Tình huống hai kênh cùng mua món hàng cuối cùng, chỉ là minh hoạ.' },
+    { id: 'EV-90230', correlationId: 'corr-tt-90230', timestamp: '10:28:02', sku: 'APP-LSH-CHR-L', product: 'Áo lụa · L', brand: 'Apex Atelier', channel: 'tiktok', source: 'Kho hàng', destination: 'TikTok Shop', kind: 'mass_push', atsDisplay: '7 → 6 · giảm 1', latencyDisplay: '4,1 giây (mẫu)', status: 'retrying', health: 'degraded', evidence: 'Lần thử lại thứ 2/5, chỉ là minh hoạ.' },
+    { id: 'EV-90220', correlationId: 'corr-sh-90220', timestamp: '10:25:14', sku: 'ACC-BELT-BLK-M', product: 'Thắt lưng bện', brand: 'Apex Goods', channel: 'shopify', source: 'Website bán hàng', destination: 'Kho hàng', kind: 'sku_ingestion', atsDisplay: '— → 12 · nhập mới', latencyDisplay: 'Chưa có mẫu', status: 'failed', health: 'discrepancy', evidence: 'SKU chưa được liên kết với sản phẩm nào trong kho.' },
+  ],
+  nodes: [
+    { id: 'node-shopee', name: 'Shopee (thử nghiệm)', environment: 'Môi trường thử nghiệm', state: 'fixture-alert', latencyDisplay: '1,2 giây (mẫu)', queueDisplay: '3 đang chờ · 1 lỗi', coverageDisplay: '53 / 60 SKU (mẫu)', icon: 'shopping_bag' },
+    { id: 'node-tiktok', name: 'TikTok Shop', environment: 'Giả lập', state: 'not-deployed', latencyDisplay: '0,84 giây (mẫu)', queueDisplay: '2 đang chờ · 0 lỗi', coverageDisplay: '58 / 60 SKU (mẫu)', icon: 'music_note' },
+    { id: 'node-lazada', name: 'Lazada', environment: 'Dự kiến kết nối', state: 'not-deployed', latencyDisplay: '1,1 giây (mẫu)', queueDisplay: '1 đang chờ · 0 lỗi', coverageDisplay: '55 / 60 SKU (mẫu)', icon: 'storefront' },
+    { id: 'node-pos', name: 'Quầy bán hàng số 1', environment: 'Máy bán hàng (mẫu)', state: 'fixture-alert', latencyDisplay: '0,18 giây (mẫu)', queueDisplay: '2 đang chờ · 1 tranh chấp', coverageDisplay: '60 / 60 SKU (mẫu)', icon: 'point_of_sale' },
+  ],
+};

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="460" viewBox="0 0 1600 460" role="img" aria-labelledby="title">
+  <title id="title">OctoFlow wordmark</title>
+  <defs><linearGradient id="amber" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#F59E0B"/><stop offset="100%" stop-color="#D97706"/></linearGradient></defs>
+  <g transform="translate(0,0) scale(0.43)">
+    
+  <title id="title">OctoFlow app icon</title>
+  <desc id="desc">Minimal octopus mark in warm white and ember orange on a carbon black background.</desc>
+  <defs>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#D97706"/>
+    </linearGradient>
+    <linearGradient id="tentacle" x1="0" y1="0" x2="0.9" y2="1">
+      <stop offset="0%" stop-color="#EE5A29"/>
+      <stop offset="100%" stop-color="#D97706"/>
+    </linearGradient>
+  </defs>
+  
+  <path d="M362 570 C319 618 268 668 224 724 C190 768 208 814 250 817 C294 820 319 773 350 746 C378 721 399 725 415 749 C433 775 427 816 464 831 C503 847 533 816 526 778 C520 744 505 718 512 686"
+        fill="none" stroke="url(#tentacle)" stroke-width="58" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M435 580 C398 638 382 692 388 744 C393 788 428 814 461 792 C486 775 475 741 481 714 C487 685 505 670 526 668"
+        fill="none" stroke="#EE5A29" stroke-width="58" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M589 579 C625 636 642 689 636 741 C631 785 596 812 563 790 C538 773 549 739 543 712 C537 684 519 669 498 668"
+        fill="none" stroke="#EE5A29" stroke-width="58" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M662 564 C709 610 755 658 799 713 C833 755 815 804 773 811 C730 818 704 771 673 744 C645 720 625 723 609 746 C591 771 597 813 560 830 C521 848 491 817 498 779 C504 745 519 718 512 686"
+        fill="none" stroke="url(#amber)" stroke-width="58" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M512 164 C376 164 276 267 276 405 C276 518 370 588 512 588 C654 588 748 518 748 405 C748 267 648 164 512 164Z" fill="#F5F2ED"/>
+  <path d="M384 396 C384 367 403 346 430 346 C457 346 476 367 476 396" fill="none" stroke="#0B0C0E" stroke-width="30" stroke-linecap="round"/>
+  <path d="M548 396 C548 367 567 346 594 346 C621 346 640 367 640 396" fill="none" stroke="#0B0C0E" stroke-width="30" stroke-linecap="round"/>
+  <circle cx="744" cy="280" r="35" fill="#EE5A29"/>
+  <circle cx="790" cy="358" r="24" fill="url(#amber)"/>
+  <circle cx="280" cy="333" r="25" fill="#EE5A29"/>
+  <circle cx="232" cy="416" r="18" fill="url(#amber)"/>
+  <circle cx="337" cy="790" r="23" fill="#EE5A29"/>
+  <circle cx="687" cy="791" r="23" fill="url(#amber)"/>
+  <circle cx="512" cy="866" r="31" fill="#EE5A29"/>
+
+  </g>
+  <text x="480" y="230" font-family="Inter, Manrope, Arial, sans-serif" font-size="172" font-weight="800" letter-spacing="-7" fill="#F5F2ED">Octo<tspan fill="url(#amber)">Flow</tspan></text>
+  <text x="492" y="315" font-family="Inter, Arial, sans-serif" font-size="32" font-weight="400" letter-spacing="3" fill="#D1D5DB">Smarter Inventory. Bigger Opportunities.</text>
+</svg>

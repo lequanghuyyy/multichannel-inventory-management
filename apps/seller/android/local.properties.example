@@ -1,0 +1,12 @@
+# Android SDK location
+# Sao chép file này thành local.properties và cập nhật đường dẫn SDK của bạn
+# File local.properties sẽ không được commit vào git
+
+## Ví dụ cho Windows:
+sdk.dir=C\:\\Android
+
+## Ví dụ cho macOS/Linux:
+# sdk.dir=/Users/username/Android/sdk
+
+## Hoặc dùng biến môi trường ANDROID_HOME/ANDROID_SDK_ROOT
+# Gradle sẽ tự động sử dụng nếu local.properties không tồn tại
