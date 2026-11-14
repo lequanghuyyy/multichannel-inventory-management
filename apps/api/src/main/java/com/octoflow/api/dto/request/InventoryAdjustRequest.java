@@ -1,5 +1,6 @@
 package com.octoflow.api.dto.request;
 
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
@@ -16,5 +17,12 @@ public record InventoryAdjustRequest(
         @Size(max = 255, message = "Lý do điều chỉnh không được vượt quá 255 ký tự")
         String reason,
 
-        Long expectedVersion
-) {}
+        Long expectedVersion,
+
+        @Min(value = 0, message = "Tồn đệm không được âm")
+        Integer safetyBuffer
+) {
+    public InventoryAdjustRequest(String sku, Integer delta, String reason, Long expectedVersion) {
+        this(sku, delta, reason, expectedVersion, null);
+    }
+}

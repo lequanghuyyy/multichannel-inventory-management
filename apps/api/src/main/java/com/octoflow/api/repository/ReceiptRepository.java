@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
 import java.util.Optional;
 
 @Repository
@@ -18,4 +19,11 @@ public interface ReceiptRepository extends JpaRepository<Receipt, Long> {
     Optional<Receipt> findByIdForUpdate(@Param("id") Long id);
 
     Optional<Receipt> findByReceiptNumber(String receiptNumber);
+
+    @Query("""
+            SELECT CASE WHEN COUNT(i) > 0 THEN true ELSE false END
+            FROM ReceiptItem i
+            WHERE i.variantId IN :variantIds
+            """)
+    boolean existsItemByVariantIdIn(@Param("variantIds") Collection<Long> variantIds);
 }

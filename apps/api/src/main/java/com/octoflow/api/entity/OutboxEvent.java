@@ -52,6 +52,9 @@ public class OutboxEvent extends BaseEntity {
     @Column(name = "locked_by", length = 128)
     private String lockedBy;
 
+    @Column(name = "lease_until")
+    private Instant leaseUntil;
+
     @Column(name = "published_at")
     private Instant publishedAt;
 
@@ -143,6 +146,8 @@ public class OutboxEvent extends BaseEntity {
     public void setLockedAt(Instant lockedAt) { this.lockedAt = lockedAt; }
     public String getLockedBy() { return lockedBy; }
     public void setLockedBy(String lockedBy) { this.lockedBy = lockedBy; }
+    public Instant getLeaseUntil() { return leaseUntil; }
+    public void setLeaseUntil(Instant leaseUntil) { this.leaseUntil = leaseUntil; }
     public Instant getPublishedAt() { return publishedAt; }
     public void setPublishedAt(Instant publishedAt) { this.publishedAt = publishedAt; }
 }

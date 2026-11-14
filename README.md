@@ -39,3 +39,7 @@ Mặc định local dùng database `octoflow` trên `localhost:5432` với user 
 Tạo sản phẩm, điều chỉnh tồn, giữ/bán hàng, đơn hàng và phiếu nhập cần `Idempotency-Key`. Tạo sản phẩm luôn bắt đầu ở trạng thái nháp với tồn bằng 0; nhập tồn sau đó qua phiếu nhập hoặc điều chỉnh có lý do. Kết quả idempotency được giữ 24 giờ mặc định; thời hạn có thể cấu hình bằng `IDEMPOTENCY_TTL`.
 
 Đánh giá nền tảng Java và các quyết định của Phase 01: [docs/audits/phase-01-java-foundation-review.md](docs/audits/phase-01-java-foundation-review.md).
+
+Rà soát an toàn dữ liệu Phase 01.1 — order identity, contract POS-only, thứ tự khóa tồn kho, reservation/receiving: [docs/audits/phase-01.1-java-data-safety-review.md](docs/audits/phase-01.1-java-data-safety-review.md).
+
+Rà soát Phase 02 — vòng đời sản phẩm/SKU, tồn trung tâm và nhập hàng nhiều đợt: [docs/audits/phase-02-inventory-receiving-review.md](docs/audits/phase-02-inventory-receiving-review.md). Mỗi lần nhận hàng là một batch độc lập; chỉ số lượng được chấp nhận mới tăng tồn, batch chỉ có hàng lỗi vẫn được lưu audit nhưng không tạo ledger/outbox.

@@ -17,5 +17,11 @@ public interface ReservationService {
 
     void release(Long reservationId);
 
-    void expireHolds();
+    /**
+     * Sweeps one candidate at a time in its own transaction. A single inconsistent reservation
+     * is reported and skipped; it cannot roll back other holds that were validly expired.
+     */
+    ExpirySweepResult expireHolds();
+
+    record ExpirySweepResult(int expired, int skipped, int failed) {}
 }

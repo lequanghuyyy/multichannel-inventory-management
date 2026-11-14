@@ -1,6 +1,7 @@
 package com.octoflow.api.entity;
 
 import jakarta.persistence.*;
+import java.time.Instant;
 
 @Entity
 @Table(name = "channel_listings", uniqueConstraints = {
@@ -26,6 +27,22 @@ public class ChannelListing extends BaseEntity {
     @Column(name = "external_sku", length = 64)
     private String externalSku;
 
+    @Column(name = "external_variant_id", length = 128)
+    private String externalVariantId;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "mapping_status", nullable = false, length = 24)
+    private MappingStatus mappingStatus = MappingStatus.UNVERIFIED;
+
+    @Column(name = "mapping_verified_at")
+    private Instant mappingVerifiedAt;
+
+    @Column(name = "mapping_version", nullable = false)
+    private long mappingVersion;
+
+    @Column(name = "active", nullable = false)
+    private boolean active = true;
+
     @Column(name = "allocated_quota", nullable = false)
     private int allocatedQuota = 0;
 
@@ -36,8 +53,30 @@ public class ChannelListing extends BaseEntity {
     @Column(name = "sync_status", nullable = false, length = 32)
     private SyncStatus syncStatus = SyncStatus.UNVERIFIED;
 
+    @Column(name = "sent_quantity")
+    private Integer sentQuantity;
+
+    @Column(name = "acknowledged_quantity")
+    private Integer acknowledgedQuantity;
+
+    @Column(name = "verified_quantity")
+    private Integer verifiedQuantity;
+
+    @Column(name = "last_sync_error", length = 500)
+    private String lastSyncError;
+
+    @Column(name = "last_verified_at")
+    private Instant lastVerifiedAt;
+
+    @Column(name = "target_allocation_revision", nullable = false)
+    private long targetAllocationRevision = 0L;
+
     public enum SyncStatus {
         UNVERIFIED, SYNCED, OUT_OF_SYNC, ERROR
+    }
+
+    public enum MappingStatus {
+        UNVERIFIED, REGISTERED, VERIFIED
     }
 
     public Long getId() {
@@ -80,6 +119,46 @@ public class ChannelListing extends BaseEntity {
         this.externalSku = externalSku;
     }
 
+    public String getExternalVariantId() {
+        return externalVariantId;
+    }
+
+    public void setExternalVariantId(String externalVariantId) {
+        this.externalVariantId = externalVariantId;
+    }
+
+    public MappingStatus getMappingStatus() {
+        return mappingStatus;
+    }
+
+    public void setMappingStatus(MappingStatus mappingStatus) {
+        this.mappingStatus = mappingStatus;
+    }
+
+    public Instant getMappingVerifiedAt() {
+        return mappingVerifiedAt;
+    }
+
+    public void setMappingVerifiedAt(Instant mappingVerifiedAt) {
+        this.mappingVerifiedAt = mappingVerifiedAt;
+    }
+
+    public long getMappingVersion() {
+        return mappingVersion;
+    }
+
+    public void setMappingVersion(long mappingVersion) {
+        this.mappingVersion = mappingVersion;
+    }
+
+    public boolean isActive() {
+        return active;
+    }
+
+    public void setActive(boolean active) {
+        this.active = active;
+    }
+
     public int getAllocatedQuota() {
         return allocatedQuota;
     }
@@ -102,5 +181,53 @@ public class ChannelListing extends BaseEntity {
 
     public void setSyncStatus(SyncStatus syncStatus) {
         this.syncStatus = syncStatus;
+    }
+
+    public Integer getSentQuantity() {
+        return sentQuantity;
+    }
+
+    public void setSentQuantity(Integer sentQuantity) {
+        this.sentQuantity = sentQuantity;
+    }
+
+    public Integer getAcknowledgedQuantity() {
+        return acknowledgedQuantity;
+    }
+
+    public void setAcknowledgedQuantity(Integer acknowledgedQuantity) {
+        this.acknowledgedQuantity = acknowledgedQuantity;
+    }
+
+    public Integer getVerifiedQuantity() {
+        return verifiedQuantity;
+    }
+
+    public void setVerifiedQuantity(Integer verifiedQuantity) {
+        this.verifiedQuantity = verifiedQuantity;
+    }
+
+    public String getLastSyncError() {
+        return lastSyncError;
+    }
+
+    public void setLastSyncError(String lastSyncError) {
+        this.lastSyncError = lastSyncError;
+    }
+
+    public Instant getLastVerifiedAt() {
+        return lastVerifiedAt;
+    }
+
+    public void setLastVerifiedAt(Instant lastVerifiedAt) {
+        this.lastVerifiedAt = lastVerifiedAt;
+    }
+
+    public long getTargetAllocationRevision() {
+        return targetAllocationRevision;
+    }
+
+    public void setTargetAllocationRevision(long targetAllocationRevision) {
+        this.targetAllocationRevision = targetAllocationRevision;
     }
 }

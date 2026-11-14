@@ -22,7 +22,11 @@ public class ReservationExpirationWorker {
     @Scheduled(fixedDelay = 60000) // Every 1 minute
     public void sweepExpiredReservations() {
         try {
-            reservationService.expireHolds();
+            var result = reservationService.expireHolds();
+            if (result.failed() > 0) {
+                log.warn("Reservation expiry sweep finished with {} failure(s); valid holds were still committed",
+                        result.failed());
+            }
         } catch (Exception ex) {
             log.error("Error during reservation expiration sweep: {}", ex.getMessage(), ex);
         }

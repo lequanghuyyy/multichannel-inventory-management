@@ -30,6 +30,13 @@ public interface ReservationRepository extends JpaRepository<Reservation, Long> 
     @Query("SELECT r.variantId FROM Reservation r WHERE r.id = :id")
     java.util.Optional<Long> findVariantIdById(@Param("id") Long id);
 
+    /**
+     * The database clock is read after the balance and reservation locks are held, so a
+     * transaction that waited on a lock does not decide expiry from a stale application clock.
+     */
+    @Query(value = "SELECT clock_timestamp()", nativeQuery = true)
+    java.sql.Timestamp databaseNow();
+
     interface ExpiredReservationCandidate {
         Long getId();
         Long getVariantId();

@@ -1,6 +1,7 @@
 package com.octoflow.api.entity;
 
 import jakarta.persistence.*;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -35,6 +36,16 @@ public class Order extends BaseEntity {
 
     @Column(name = "external_order_id", length = 128)
     private String externalOrderId;
+
+    @Column(name = "channel_id")
+    private Long channelId;
+
+    /**
+     * Expiry of the POS stock hold. Only set for unpaid POS orders in PLACED; it is cleared on
+     * payment, cancellation, and expiry. Marketplace orders always leave this null.
+     */
+    @Column(name = "hold_expires_at")
+    private Instant holdExpiresAt;
 
     @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<OrderItem> items = new ArrayList<>();
@@ -113,6 +124,22 @@ public class Order extends BaseEntity {
 
     public void setExternalOrderId(String externalOrderId) {
         this.externalOrderId = externalOrderId;
+    }
+
+    public Long getChannelId() {
+        return channelId;
+    }
+
+    public void setChannelId(Long channelId) {
+        this.channelId = channelId;
+    }
+
+    public Instant getHoldExpiresAt() {
+        return holdExpiresAt;
+    }
+
+    public void setHoldExpiresAt(Instant holdExpiresAt) {
+        this.holdExpiresAt = holdExpiresAt;
     }
 
     public List<OrderItem> getItems() {

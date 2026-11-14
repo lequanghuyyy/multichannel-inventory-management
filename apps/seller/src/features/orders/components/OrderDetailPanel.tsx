@@ -1,0 +1,27 @@
+import { StatusBadge } from '../../../components/common/StatusBadge';
+import { Button } from '../../../components/ui/Button';
+import { Card } from '../../../components/ui/Card';
+import { cn } from '../../../lib/cn';
+import type { Order } from '../order.types';
+import { formatOrderTime } from '../order.utils';
+import { OrderChannelBadge, OrderStatusBadge } from './OrderParts';
+
+export interface OrderDetailPanelProps {
+  order: Order;
+  onOpenDetail?: () => void;
+  showAudit?: boolean;
+}
+
+export function OrderDetailPanel({ onOpenDetail, order, showAudit = false }: OrderDetailPanelProps) {
+  return (
+    <Card className="grid gap-5 border border-metric-ink p-0 shadow-metric ring-0" aria-label={`Chi tiết ${order.reference}`}>
+      <header className="grid gap-3 border-b border-outline-variant/50 p-5"><div className="flex items-start justify-between gap-3"><div><span className="font-body text-caption font-semibold uppercase tracking-wider text-graphite">Xem nhanh đơn hàng</span><h2 className="mt-1 font-display text-xl font-bold text-on-surface">{order.reference}</h2><code className="font-mono text-caption text-graphite">{order.marketplaceReference}</code></div><OrderStatusBadge order={order} /></div><OrderChannelBadge order={order} /><dl className="grid grid-cols-2 gap-2 font-body text-caption"><div><dt className="text-graphite">Mã đơn trên kênh</dt><dd className="mt-1 break-all font-mono text-on-surface">{order.externalId}</dd></div><div><dt className="text-graphite">Ngày đặt</dt><dd className="mt-1 text-on-surface">{formatOrderTime(order.placedAt)}</dd></div><div><dt className="text-graphite">Khách hàng</dt><dd className="mt-1 font-semibold text-on-surface">{order.customer.name}</dd></div><div><dt className="text-graphite">Địa chỉ</dt><dd className="mt-1 text-on-surface">{order.customer.location}</dd></div></dl></header>
+      <div className="grid items-start gap-6 px-5 lg:grid-cols-2">
+        <section className="grid gap-3" aria-labelledby={`items-${order.id}`}><div className="flex items-center justify-between"><h3 id={`items-${order.id}`} className="font-display text-base font-bold text-on-surface">Dòng hàng đang giữ</h3><strong className="font-body text-body-sm text-on-surface">{order.total.formatted}</strong></div>{order.items.map((item) => <article key={item.sku} className="grid gap-3 rounded-control bg-surface-container-low p-3"><div className="flex justify-between gap-3"><div><strong className="font-body text-body-sm text-on-surface">{item.name}</strong><p className="font-body text-caption text-graphite">{item.variant} · SL {item.quantity}</p></div><span className="font-body text-caption font-semibold text-on-surface">{item.total.formatted}</span></div><code className="font-mono text-caption text-on-surface">{item.sku}</code><div className="border-t border-outline-variant/50 pt-2 font-body text-caption text-graphite"><strong className="text-on-surface">{item.inventoryStatus}</strong> · {item.warehouse}</div></article>)}</section>
+        <section className="grid gap-3" aria-labelledby={`lifecycle-${order.id}`}><h3 id={`lifecycle-${order.id}`} className="font-display text-base font-bold text-on-surface">Tiến trình đơn hàng (mẫu)</h3><ol className="grid gap-0">{order.lifecycle.map((event, index) => <li key={event.id} className="grid grid-cols-[1.25rem_1fr] gap-3"><span className="relative flex justify-center"><span className={cn('relative z-10 mt-1.5 size-2.5 rounded-full ring-4 ring-pure-white', event.state === 'complete' ? 'bg-traffic-maximize' : event.state === 'current' ? 'bg-apricot' : 'bg-outline-variant')} />{index < order.lifecycle.length - 1 ? <span className="absolute bottom-0 top-3 w-px bg-outline-variant" /> : null}</span><div className="pb-4"><div className="flex flex-wrap items-center justify-between gap-2"><strong className="font-body text-body-sm text-on-surface">{event.label}</strong><span className="font-mono text-[10px] text-graphite">{event.timestamp}</span></div><p className="mt-0.5 font-body text-caption leading-4 text-graphite">{event.detail}</p></div></li>)}</ol></section>
+      </div>
+      {showAudit && order.audit.length > 0 ? <section className="grid gap-3 border-t border-outline-variant/50 px-5 pt-5"><div className="flex items-center justify-between"><h3 className="font-display text-base font-bold text-on-surface">Nhật ký thao tác (mẫu)</h3><StatusBadge tone="warning">Dữ liệu mẫu</StatusBadge></div>{order.audit.map((event) => <div key={event.id} className="grid grid-cols-[auto_1fr] gap-3 rounded-control bg-surface-container-low p-3"><time className="font-mono text-[10px] text-graphite">{event.time}</time><div><strong className="block font-body text-caption text-on-surface">{event.event}</strong><span className="font-body text-caption text-graphite">{event.mutation} · {event.actor}</span></div></div>)}</section> : null}
+      <footer className="grid gap-2 border-t border-outline-variant/50 bg-surface-container-low/50 p-5"><div className="grid grid-cols-1 gap-2 sm:grid-cols-3"><Button size="sm" disabled title="Chưa có">Phiếu soạn hàng</Button><Button variant="secondary" size="sm" disabled title="Chưa có">Trả hàng</Button><Button variant="secondary" size="sm" disabled title="Chưa có">Hủy đơn</Button></div>{onOpenDetail ? <Button variant="ghost" size="sm" onClick={onOpenDetail}>Mở trang chi tiết <span className="material-symbols-outlined text-base" aria-hidden="true">arrow_forward</span></Button> : null}</footer>
+    </Card>
+  );
+}

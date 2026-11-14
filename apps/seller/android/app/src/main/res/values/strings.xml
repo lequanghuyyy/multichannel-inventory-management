@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Octoflow</string>
+    <string name="title_activity_main">Octoflow</string>
+    <string name="package_name">com.datt.seller</string>
+    <string name="custom_url_scheme">com.datt.seller</string>
+</resources>

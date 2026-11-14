@@ -48,9 +48,20 @@ public class ChannelMapper {
                 listing.getVariant() != null ? listing.getVariant().getSku() : null,
                 listing.getExternalListingId(),
                 listing.getExternalSku(),
+                listing.getExternalVariantId(),
+                listing.getMappingStatus() != null
+                        ? listing.getMappingStatus().name() : ChannelListing.MappingStatus.UNVERIFIED.name(),
+                listing.getMappingVerifiedAt(),
+                listing.isActive(),
                 listing.getAllocatedQuota(),
                 listing.getReportedStock(),
                 listing.getSyncStatus() != null ? listing.getSyncStatus().name() : ChannelListing.SyncStatus.UNVERIFIED.name(),
+                listing.getSentQuantity(),
+                listing.getAcknowledgedQuantity(),
+                listing.getVerifiedQuantity(),
+                listing.getLastSyncError(),
+                listing.getLastVerifiedAt(),
+                listing.getTargetAllocationRevision(),
                 listing.getUpdatedAt()
         );
     }

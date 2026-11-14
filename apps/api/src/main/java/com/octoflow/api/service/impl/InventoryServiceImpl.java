@@ -87,8 +87,11 @@ public class InventoryServiceImpl implements InventoryService {
             throw new BusinessRuleException(ErrorCode.STALE_VERSION, "Số liệu tồn kho đã thay đổi từ lần xem trước. Hãy tải lại.");
         }
 
-        if (request.delta() == 0) {
-            throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "Điều chỉnh tồn phải thay đổi ít nhất một đơn vị.");
+        if (request.delta() == null) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "Số lượng thay đổi (delta) không được để trống.");
+        }
+        if (request.reason() == null || request.reason().isBlank()) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "Lý do điều chỉnh bắt buộc phải có.");
         }
         int newOnHand;
         try {
@@ -99,11 +102,23 @@ public class InventoryServiceImpl implements InventoryService {
         if (newOnHand < 0) {
             throw new BusinessRuleException(ErrorCode.INVALID_STOCK_BALANCE, "Tồn vật lý không thể âm sau khi điều chỉnh.");
         }
-        if (newOnHand < balance.getReserved() + balance.getSafetyBuffer()) {
-            throw new BusinessRuleException(ErrorCode.INVALID_STOCK_BALANCE, "Tồn vật lý sau điều chỉnh không đủ đáp ứng số đang giữ và đệm an toàn.");
+        int newSafetyBuffer = request.safetyBuffer() != null
+                ? request.safetyBuffer()
+                : balance.getSafetyBuffer();
+        if (newSafetyBuffer < 0) {
+            throw new BusinessRuleException(ErrorCode.INVALID_STOCK_BALANCE, "Tồn đệm không được âm.");
+        }
+        if (newOnHand < balance.getReserved() + newSafetyBuffer) {
+            throw new BusinessRuleException(ErrorCode.INVALID_STOCK_BALANCE,
+                    "Tồn vật lý sau điều chỉnh không đủ đáp ứng số đang giữ và đệm an toàn.");
+        }
+        if (newOnHand == balance.getOnHand() && newSafetyBuffer == balance.getSafetyBuffer()) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                    "Điều chỉnh tồn phải thay đổi số lượng vật lý hoặc tồn đệm.");
         }
 
         balance.setOnHand(newOnHand);
+        balance.setSafetyBuffer(newSafetyBuffer);
         balanceRepository.save(balance);
         movementRecorder.record(variant.getId(), before, balance, "ADJUSTMENT", request.reason(), idempotencyKey);
 

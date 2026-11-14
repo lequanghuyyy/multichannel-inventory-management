@@ -17,6 +17,12 @@ public class ReceiptItem extends BaseEntity {
     @Column(name = "variant_id", nullable = false)
     private Long variantId;
 
+    @Column(nullable = false, length = 64)
+    private String sku;
+
+    @Column(name = "variant_title", nullable = false, length = 128)
+    private String variantTitle;
+
     @Column(name = "expected_qty", nullable = false)
     private int expectedQty;
 
@@ -26,8 +32,19 @@ public class ReceiptItem extends BaseEntity {
     @Column(name = "rejected_qty", nullable = false)
     private int rejectedQty = 0;
 
-    @Column(name = "unit_cost")
+    @Column(name = "unit_cost", nullable = false)
     private Long unitCost = 0L;
+
+    @Column(name = "rejection_reason", length = 500)
+    private String rejectionReason;
+
+    public int getProcessedQty() {
+        return acceptedQty + rejectedQty;
+    }
+
+    public int getRemainingQty() {
+        return expectedQty - getProcessedQty();
+    }
 
     public Long getId() {
         return id;
@@ -51,6 +68,22 @@ public class ReceiptItem extends BaseEntity {
 
     public void setVariantId(Long variantId) {
         this.variantId = variantId;
+    }
+
+    public String getSku() {
+        return sku;
+    }
+
+    public void setSku(String sku) {
+        this.sku = sku;
+    }
+
+    public String getVariantTitle() {
+        return variantTitle;
+    }
+
+    public void setVariantTitle(String variantTitle) {
+        this.variantTitle = variantTitle;
     }
 
     public int getExpectedQty() {
@@ -83,5 +116,13 @@ public class ReceiptItem extends BaseEntity {
 
     public void setUnitCost(Long unitCost) {
         this.unitCost = unitCost;
+    }
+
+    public String getRejectionReason() {
+        return rejectionReason;
+    }
+
+    public void setRejectionReason(String rejectionReason) {
+        this.rejectionReason = rejectionReason;
     }
 }

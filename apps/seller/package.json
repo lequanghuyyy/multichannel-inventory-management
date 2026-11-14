@@ -1,0 +1,64 @@
+{
+  "name": "datt-seller",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "validate:contracts": "node ./scripts/validate-contracts.mjs",
+    "api:generate": "node ./scripts/generate-openapi.mjs",
+    "api:check": "npm run api:generate && git diff --exit-code -- src/api/generated/openapi.ts",
+    "check:secrets": "node ./scripts/check-frontend-secrets.mjs",
+    "mobile:sync": "npm run build && cap sync",
+    "mobile:verify": "node ../../scripts/verify-mobile.mjs",
+    "mobile:release:verify": "node ../../scripts/verify-mobile.mjs --require-native-api --require-native-evidence",
+    "mobile:android:build": "npm run build && cap sync android && cap build android",
+    "mobile:android:run": "npm run build && cap sync android && cap run android",
+    "android:add": "cap add android",
+    "ios:add": "cap add ios",
+    "android:open": "cap open android",
+    "ios:open": "cap open ios"
+  },
+  "dependencies": {
+    "@aparajita/capacitor-secure-storage": "8.0.1",
+    "@capacitor/android": "^8.0.0",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/core": "^8.0.0",
+    "@capacitor/ios": "^8.0.0",
+    "clsx": "^2.1.1",
+    "openapi-fetch": "^0.17.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tailwind-merge": "^3.7.0"
+  },
+  "devDependencies": {
+    "@apidevtools/swagger-parser": "^10.1.1",
+    "@capacitor/cli": "^8.0.0",
+    "@playwright/test": "^1.58.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.2",
+    "jsdom": "^29.1.1",
+    "openapi-typescript": "^7.13.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1",
+    "vitest": "^4.1.12"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
+  }
+}
