@@ -31,19 +31,20 @@ export interface ProductApiRow {
 }
 
 export function toProductApiRow(summary: ProductSummary): ProductApiRow {
+  const row = summary as any;
   return {
-    id: summary.id,
-    name: summary.name,
-    masterSku: '',
-    brand: '',
-    category: summary.category,
-    status: summary.status,
-    primaryMediaId: undefined,
-    variantCount: summary.variantCount,
-    onHand: summary.onHand,
-    reserved: summary.reserved,
-    safetyBuffer: summary.safetyBuffer,
-    availableToSell: summary.availableToSell,
+    id: String(row.id ?? ''),
+    name: row.name ?? '',
+    masterSku: row.masterSku ?? row.master_sku ?? '',
+    brand: row.brand ?? '',
+    category: row.category ?? '',
+    status: row.status ?? 'draft',
+    primaryMediaId: row.primaryMediaId ?? row.primary_media_id,
+    variantCount: row.variantCount ?? row.variant_count ?? 0,
+    onHand: row.onHand ?? row.on_hand ?? 0,
+    reserved: row.reserved ?? 0,
+    safetyBuffer: row.safetyBuffer ?? row.safety_buffer ?? 0,
+    availableToSell: row.availableToSell ?? row.available_to_sell ?? 0,
   };
 }
 

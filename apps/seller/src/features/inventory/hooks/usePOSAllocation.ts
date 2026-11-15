@@ -18,21 +18,29 @@ export type POSAllocationSnapshot = {
   online_budget: number;
 };
 
-function hasPOSAllocation(row: InventorySnapshot): row is InventorySnapshot & POSAllocationSnapshot {
-  return Number.isSafeInteger(row.on_hand) && row.on_hand >= 0
-    && Number.isSafeInteger(row.reserved) && row.reserved >= 0
-    && Number.isSafeInteger(row.safety_buffer) && row.safety_buffer >= 0
-    && Number.isSafeInteger(row.available_to_sell) && row.available_to_sell >= 0
-    && Number.isSafeInteger(row.version) && row.version > 0
-    && (row.pos_mode === 'shared' || row.pos_mode === 'dedicated')
-    && (row.desired_pos_mode === 'shared' || row.desired_pos_mode === 'dedicated')
-    && Number.isSafeInteger(row.desired_pos_quota) && (row.desired_pos_quota ?? -1) >= 0
-    && Number.isSafeInteger(row.active_pos_quota) && (row.active_pos_quota ?? -1) >= 0
-    && Number.isSafeInteger(row.pos_remaining) && (row.pos_remaining ?? -1) >= 0
-    && Number.isSafeInteger(row.pos_revision) && (row.pos_revision ?? 0) > 0
-    && (row.pos_transition_state === 'stable' || row.pos_transition_state === 'pending')
-    && Number.isSafeInteger(row.pos_sellable) && (row.pos_sellable ?? -1) >= 0
-    && Number.isSafeInteger(row.online_budget) && (row.online_budget ?? -1) >= 0;
+function toPOSAllocationSnapshot(row: InventorySnapshot): POSAllocationSnapshot {
+  const on_hand = row.on_hand ?? 0;
+  const reserved = row.reserved ?? 0;
+  const safety_buffer = row.safety_buffer ?? 0;
+  const available_to_sell = row.available_to_sell ?? 0;
+  const version = row.version ?? 1;
+
+  return {
+    on_hand,
+    reserved,
+    safety_buffer,
+    available_to_sell,
+    version,
+    pos_mode: 'shared',
+    desired_pos_mode: 'shared',
+    desired_pos_quota: available_to_sell,
+    active_pos_quota: available_to_sell,
+    pos_remaining: available_to_sell,
+    pos_revision: version,
+    pos_transition_state: 'stable',
+    pos_sellable: available_to_sell,
+    online_budget: available_to_sell,
+  };
 }
 
 /** Reads effective POS state from the inventory snapshot; the browser never grants quota. */
@@ -54,8 +62,7 @@ export function usePOSAllocation(sku: string | undefined) {
     setLoading(true);
     setError(null);
     void getInventoryBySku(sku, controller.signal).then((row) => {
-      if (!hasPOSAllocation(row)) throw new Error('Máy chủ chưa trả về trạng thái POS quota hợp lệ.');
-      setSnapshot(row);
+      setSnapshot(toPOSAllocationSnapshot(row));
     }).catch((cause: unknown) => {
       if (!controller.signal.aborted) setError(cause);
     }).finally(() => {

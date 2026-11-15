@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Card } from '../../../components/ui/Card';
 import { Button } from '../../../components/ui/Button';
 import { StatusBadge } from '../../../components/common/StatusBadge';
@@ -19,7 +20,8 @@ import {
 export interface OrderOverviewTabProps {
   order: OrderApiRow;
   onNextAction: (target: ApiOrderTransitionTarget) => void;
-  onOpenCancelModal: () => void;
+  /** Cancels with the typed reason; resolves to whether the server accepted it. */
+  onCancel: (reason: string) => Promise<boolean>;
   onOpenPaymentModal: () => void;
   onShopifyUpdated?: () => void;
   busy?: boolean;
@@ -93,7 +95,7 @@ function getNextActionMeta(order: OrderApiRow) {
 export function OrderOverviewTab({
   order,
   onNextAction,
-  onOpenCancelModal,
+  onCancel,
   onOpenPaymentModal,
   onShopifyUpdated,
   busy = false,
@@ -108,6 +110,18 @@ export function OrderOverviewTab({
   const canCancel = guard
     ? guard.can_cancel
     : order.status === 'placed' || order.status === 'confirmed' || order.status === 'packed';
+
+  // The cancellation reason lives here, next to the button that consumes it: the reason is
+  // the only record left of why stock went back on the shelf, so the form is inline and the
+  // button stays disabled until it is filled.
+  const [cancelReason, setCancelReason] = useState('');
+  const submitCancel = async () => {
+    const trimmed = cancelReason.trim();
+    if (!trimmed || busy) return;
+    const accepted = await onCancel(trimmed);
+    if (accepted) setCancelReason('');
+  };
+  const cancelReasonId = `cancel-reason-input-${order.id}`;
 
   return (
     <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-12">
@@ -126,7 +140,7 @@ export function OrderOverviewTab({
                 Tiến trình đơn hàng
               </span>
               <h2 className="mt-0.5 font-display text-base font-bold text-on-surface">
-                {isCancelled ? 'Đơn hàng đã hủy' : isDelivered ? 'Đơn hàng đã hoàn tất giao' : 'Đang xử lý theo quy trình'}
+                {isCancelled ? 'Đơn hàng đã hủy' : isDelivered ? 'Đơn đã giao' : 'Đang xử lý theo quy trình'}
               </h2>
             </div>
             <StatusBadge tone={isCancelled ? 'danger' : isDelivered ? 'success' : 'neutral'}>
@@ -212,33 +226,72 @@ export function OrderOverviewTab({
                   onClick={() => onNextAction(nextAction.target)}
                   className="shrink-0 font-bold"
                 >
-                  {nextAction.label} →
+                  {/* One static label: the header toolbar already carries the step's own
+                      name, and a second button repeating it would make "which one did I
+                      click" ambiguous for keyboard and screen-reader users. */}
+                  Thực hiện bước này
                 </Button>
               </div>
             </div>
           ) : null}
 
-          {/* Cancellation Option Link */}
-          {!isCancelled && !isDelivered ? (
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-outline-variant/40 pt-3 font-body text-caption text-graphite">
-              <span>
-                {canCancel
-                  ? 'Nếu khách hàng đổi ý hoặc không thể xử lý đơn:'
-                  : 'Không thể hủy đơn ở trạng thái hiện tại.'}
-              </span>
-              {canCancel ? (
-                <button
-                  type="button"
-                  onClick={onOpenCancelModal}
-                  disabled={busy}
-                  className="font-medium text-danger hover:underline disabled:opacity-50"
-                >
-                  Hủy đơn hàng này...
-                </button>
-              ) : null}
+          {/* Non-cancellable states keep a plain statement; cancellable ones get the form
+              below, so there is exactly one "Hủy đơn" button on the whole page. */}
+          {!isCancelled && !isDelivered && !canCancel ? (
+            <div className="border-t border-outline-variant/40 pt-3 font-body text-caption text-graphite">
+              Không thể hủy đơn ở trạng thái hiện tại.
             </div>
           ) : null}
         </Card>
+
+        {/* Inline cancellation form */}
+        {canCancel ? (
+          <Card className="grid gap-3 border border-danger/30 bg-danger/5 p-5 shadow-none" aria-label="Hủy đơn hàng">
+            <div className="grid gap-1">
+              <h3 className="font-display text-base font-bold text-on-surface">Hủy đơn hàng</h3>
+              <p className="font-body text-caption text-graphite">
+                Hủy sẽ hoàn trả toàn bộ chỗ giữ về tồn kho khả dụng (ATS) và ghi lý do vào nhật ký kiểm toán. Thao tác không thể hoàn tác.
+              </p>
+            </div>
+            {order.status === 'packed' ? (
+              <div className="flex items-start gap-2.5 rounded-control border border-warning/40 bg-warning/10 p-3 text-on-surface">
+                <span className="material-symbols-outlined text-[18px] text-warning" aria-hidden="true">
+                  warning
+                </span>
+                <p className="font-body text-caption leading-relaxed">
+                  Cảnh báo khi hủy đơn đã đóng gói: hệ thống hoàn trả chỗ giữ ngay lập tức, nhưng kiện vẫn nằm tại quầy — bạn cần bóc kiện và xếp hàng trở lại kệ kho thì số lượng mới thực sự về đúng kệ.
+                </p>
+              </div>
+            ) : null}
+            <div className="grid gap-1.5">
+              <div className="flex items-center justify-between">
+                <label htmlFor={cancelReasonId} className="font-body text-caption font-semibold text-on-surface">
+                  Lý do hủy đơn <span className="text-danger">*</span>
+                </label>
+                <span className="font-mono text-[11px] text-graphite">{cancelReason.length}/500</span>
+              </div>
+              <textarea
+                id={cancelReasonId}
+                className="min-h-24 w-full rounded-control border border-outline-variant bg-pure-white p-3 font-body text-sm text-on-surface outline-none focus:border-channel-accent focus:ring-1 focus:ring-channel-accent"
+                value={cancelReason}
+                onChange={(event) => setCancelReason(event.target.value)}
+                placeholder="Nhập lý do chi tiết: Khách yêu cầu hủy, hết hàng tại kho, sai lệch thông tin địa chỉ..."
+                maxLength={500}
+                disabled={busy}
+              />
+            </div>
+            <Button
+              variant="danger"
+              size="sm"
+              loading={busy}
+              disabled={busy || cancelReason.trim().length === 0}
+              onClick={() => void submitCancel()}
+              className="justify-self-start"
+            >
+              Hủy đơn
+            </Button>
+          </Card>
+        ) : null}
 
         <OrderFinancialPaymentSection order={order} onOpenPaymentModal={onOpenPaymentModal} busy={busy} />
 

@@ -102,7 +102,7 @@ const { getProductFromApi, transitionProductMock, updateVariantMock, updateProdu
 const allocationPanelMock = vi.hoisted(() => vi.fn());
 vi.mock('../inventory/components/ProductAllocationPanel', () => ({
   ProductAllocationPanel: (props: { product: { id: string }; canExecute: boolean }) => {
-    allocationPanelMock(props);
+    allocationPanelMock({ product: props.product, canExecute: props.canExecute });
     return null;
   },
 }));

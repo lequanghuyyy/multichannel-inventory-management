@@ -194,7 +194,7 @@ export function InventoryChannelEvidence({ entries, error, loading, refreshing, 
   const counts = statusCounts(entries);
   const summary = view === 'summary';
   return <Card className="grid min-w-0 gap-4 p-5 sm:p-6">
-    <header className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-display text-lg font-bold text-on-surface">Tình trạng kênh bán</h2><p className="mt-1 font-body text-body-sm text-graphite">Đối chiếu từng listing với mục tiêu tồn của Core.</p></div><Button variant="secondary" size="sm" onClick={onRefresh} loading={loading || refreshing}>Làm mới</Button></header>
+    <header className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-display text-lg font-bold text-on-surface">Channel inventory</h2><p className="mt-1 font-body text-body-sm text-graphite">Đối chiếu từng listing với mục tiêu tồn của Core.</p></div><Button variant="secondary" size="sm" onClick={onRefresh} loading={loading || refreshing}>Làm mới</Button></header>
     {loading && entries.length === 0 ? <LoadingState label="Đang tải tồn theo listing…" /> : null}
     {!loading && error && entries.length === 0 ? <ErrorState error={error} retry={onRefresh} /> : null}
     {entries.length > 0 ? <>

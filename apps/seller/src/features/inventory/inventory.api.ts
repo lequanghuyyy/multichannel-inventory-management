@@ -10,12 +10,6 @@ const lowStockThreshold = 10;
 // binding, so those two columns are the ONLY thing the fixture can supply for a known SKU.
 const fixtureBySku = new Map(inventoryManagementRows.map((row) => [row.sku, row]));
 
-const iconByCategory: Record<string, string> = {
-  FOOTWEAR: 'steps',
-  APPAREL: 'checkroom',
-  ACCESSORIES: 'account_balance_wallet',
-};
-
 const channelOrder: InventoryChannel['id'][] = ['shopee', 'tiktok', 'lazada', 'web', 'pos'];
 
 // GET /api/v1/inventory carries no channel list, no per-SKU sync state and no updated_at, so
@@ -47,10 +41,10 @@ export function inventorySyncStateOf(source: 'api' | 'fixture'): InventorySyncSt
   return source === 'api' ? 'unavailable' : 'synced';
 }
 
-/** "BLACK / 42", the label the fixture writes as "Đen / EU 42". Colour is never parsed from a SKU. */
+/** Variant title or fallback label. */
 function variantLabelOf(row: ApiInventoryRow): string {
-  const parts = [row.color, row.size].filter((part): part is string => typeof part === 'string' && part.trim() !== '');
-  return parts.length > 0 ? parts.join(' / ') : 'Một biến thể';
+  if (row.variant_title && row.variant_title.trim() !== '') return row.variant_title;
+  return 'Một biến thể';
 }
 
 /**
@@ -77,10 +71,11 @@ export function toInventoryLedgerRow(row: ApiInventoryRow, source: 'api' | 'fixt
     id: row.variant_id,
     // Only live rows carry a catalogue image. The fallback icon stays on the row so fixture
     // rows and products without media still render something meaningful.
-    ...(source === 'api' ? { productId: row.product_id, primaryMediaId: row.primary_media_id } : {}),
+    ...(source === 'api' ? { productId: row.product_id } : {}),
+    ...(source === 'api' && row.primary_media_id ? { primaryMediaId: row.primary_media_id } : {}),
     productName: row.product_name ?? row.sku,
     variantLabel: variantLabelOf(row),
-    icon: fallback?.icon ?? iconByCategory[row.category ?? ''] ?? 'qr_code_2',
+    icon: fallback?.icon ?? 'qr_code_2',
     sku: row.sku,
     barcode: fallback?.barcode ?? '',
     onHand: row.on_hand,

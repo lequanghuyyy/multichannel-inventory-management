@@ -1,7 +1,7 @@
 import type { components } from './generated/openapi';
 import { apiFetch, createApiClient } from './client';
 import { ApiRequestError, parseApiError, responseApiError } from '../core/api-error';
-import type { Page } from './list';
+import { pageOf, type Page } from './list';
 
 /**
  * One stock balance, in the shape the screens already read.
@@ -15,6 +15,11 @@ export interface InventorySnapshot {
   product_id: string;
   product_name?: string;
   variant_title?: string;
+  /**
+   * Primary catalogue media id, when the backend carries one. Absent (or null) on rows whose
+   * product has no image; the ledger thumbnail then keeps its icon fallback.
+   */
+  primary_media_id?: string | null;
   price_minor: number | null;
   currency: string;
   on_hand: number;
@@ -23,6 +28,15 @@ export interface InventorySnapshot {
   available_to_sell: number;
   version: number;
   updated_at: string;
+  pos_mode?: 'shared' | 'dedicated';
+  desired_pos_mode?: 'shared' | 'dedicated';
+  desired_pos_quota?: number;
+  active_pos_quota?: number;
+  pos_remaining?: number;
+  pos_revision?: number;
+  pos_transition_state?: 'stable' | 'pending';
+  online_budget?: number;
+  pos_sellable?: number;
 }
 
 export type InventoryRow = InventorySnapshot;
@@ -86,36 +100,41 @@ export interface InventoryMovementQuery {
 export type SKUReceiptPage = components['schemas']['SKUReceiptPage'];
 export type SKUReceipt = components['schemas']['SKUReceipt'];
 
-type ServerSnapshot = components['schemas']['InventorySnapshotResponse'];
-type ServerLedgerEntry = components['schemas']['LedgerEntryResponse'];
+export type ServerSnapshot = components['schemas']['InventorySnapshotResponse'];
+export type ServerLedgerEntry = components['schemas']['LedgerEntryResponse'];
 
 async function responseError(response: Response): Promise<never> {
   return responseApiError(response);
 }
 
-function requireId(value: number | undefined, entity: string): string {
-  if (value === undefined || !Number.isSafeInteger(value)) {
+function requireId(value: unknown, entity: string): string {
+  if (value === undefined || value === null) {
     throw new Error(`Phản hồi ${entity} không có mã hợp lệ.`);
   }
-  return String(value);
+  const str = String(value).trim();
+  if (!str) {
+    throw new Error(`Phản hồi ${entity} không có mã hợp lệ.`);
+  }
+  return str;
 }
 
-function toSnapshot(row: ServerSnapshot): InventorySnapshot {
+function toSnapshot(row: any): InventorySnapshot {
   return {
+    ...row,
     sku: row.sku ?? '',
-    variant_id: requireId(row.variant_id, 'tồn kho'),
-    product_id: requireId(row.product_id, 'tồn kho'),
-    product_name: row.product_name,
-    variant_title: row.variant_title,
+    variant_id: requireId(row.variant_id ?? row.variantId, 'tồn kho'),
+    product_id: requireId(row.product_id ?? row.productId, 'tồn kho'),
+    product_name: row.product_name ?? row.productName,
+    variant_title: row.variant_title ?? row.variantTitle,
     // The server stores VND in integer dong units; no 100x scaling is applied anywhere.
-    price_minor: row.price ?? null,
+    price_minor: row.price_minor ?? row.priceMinor ?? (row.price ?? null),
     currency: row.currency ?? 'VND',
-    on_hand: row.on_hand ?? 0,
+    on_hand: row.on_hand ?? row.onHand ?? 0,
     reserved: row.reserved ?? 0,
-    safety_buffer: row.safety_buffer ?? 0,
-    available_to_sell: row.available_to_sell ?? 0,
+    safety_buffer: row.safety_buffer ?? row.safetyBuffer ?? 0,
+    available_to_sell: row.available_to_sell ?? row.availableToSell ?? 0,
     version: row.version ?? 0,
-    updated_at: row.updated_at ?? '',
+    updated_at: row.updated_at ?? row.updatedAt ?? '',
   };
 }
 
@@ -130,7 +149,10 @@ export async function getInventoryBySku(sku: string, signal?: AbortSignal): Prom
   if (!response.ok) await responseApiError(response);
 
   if (!data) throw new Error('Dữ liệu tồn kho nhận về không hợp lệ.');
-  return toSnapshot(data);
+  if (typeof (data as any).variant_id === 'number') {
+    return toSnapshot(data);
+  }
+  return data as unknown as InventorySnapshot;
 }
 
 export interface InventoryQuery {
@@ -140,36 +162,51 @@ export interface InventoryQuery {
 }
 
 /**
- * `GET /api/v1/inventory` returns a plain array and takes no parameters, so search and paging
- * are applied here. The cursor is always null; a fake cursor would make callers re-fetch the
- * same array forever.
+ * The variant page POS uses to cap cart quantities. Supports both bare arrays from Spring Boot
+ * and legacy envelope shapes.
  */
 export async function listInventory(query: InventoryQuery = {}, signal?: AbortSignal): Promise<Page<InventoryRow>> {
   const client = createApiClient();
-  const { data, response } = await client.GET('/api/v1/inventory', { signal, cache: 'no-store' });
+  const { data, response } = await client.GET('/api/v1/inventory', {
+    params: { query: query as any },
+    signal,
+    cache: 'no-store',
+  });
 
   if (!response.ok) await responseApiError(response);
-  if (!Array.isArray(data)) throw new Error('Dữ liệu danh sách tồn kho nhận về không hợp lệ.');
-  const term = query.q?.trim().toLocaleLowerCase('vi-VN');
-  const items = data.map(toSnapshot).filter((row) => !term || [row.sku, row.product_name ?? '', row.variant_title ?? '']
-    .join(' ').toLocaleLowerCase('vi-VN').includes(term));
-  return { items, nextCursor: null };
+  if (!data) throw new Error('Dữ liệu danh sách tồn kho nhận về không hợp lệ.');
+
+  if (Array.isArray(data)) {
+    const term = query.q?.trim().toLocaleLowerCase('vi-VN');
+    const items = data.map(toSnapshot).filter((row) => !term || [row.sku, row.product_name ?? '', row.variant_title ?? '']
+      .join(' ').toLocaleLowerCase('vi-VN').includes(term));
+    return { items, nextCursor: null, totalCount: items.length };
+  }
+
+  return pageOf<InventoryRow>(data as unknown as Record<string, unknown>, 'items');
 }
 
-/** Reads one exact SKU from the full balance list; the list is the only route carrying price. */
+/** Reads one exact SKU from the priced inventory list and follows cursor if needed. */
 export async function getInventoryRowBySku(sku: string, signal?: AbortSignal): Promise<InventoryRow> {
-  const page = await listInventory({ q: sku }, signal);
-  const match = page.items.find((item) => item.sku === sku);
-  if (!match) {
-    throw new ApiRequestError({ code: 'SKU_NOT_FOUND', message: `Không tìm thấy tồn kho của SKU ${sku}.`, request_id: '' }, 404);
-  }
-  return match;
+  let cursor: string | undefined;
+  const seenCursors = new Set<string>();
+  do {
+    const page = await listInventory({ limit: 100, q: sku, ...(cursor ? { cursor } : {}) }, signal);
+    const match = page.items.find((item) => item.sku === sku);
+    if (match) return match;
+    const next = page.nextCursor;
+    if (!next) break;
+    if (seenCursors.has(next)) throw new Error('Danh sách tồn kho trả về con trỏ lặp khi đọc giá theo SKU.');
+    seenCursors.add(next);
+    cursor = next;
+  } while (true);
+  throw new Error(`Không còn tìm thấy SKU ${sku} trong danh sách tồn kho.`);
 }
 
 export interface AdjustInput {
   sku: string;
   delta: number;
-  expected_version: number;
+  expected_version?: number;
   /** Stored on the ledger row; the API rejects a missing or blank reason with 400. */
   reason: string;
 }
@@ -226,13 +263,13 @@ export async function commitBulkInventoryAdjustment(input: { reason: string; ite
 
 export async function adjustInventory(input: AdjustInput, idempotencyKey: string, signal?: AbortSignal): Promise<InventorySnapshot> {
   const client = createApiClient();
-  const { data, response } = await client.POST('/api/v1/inventory/adjust', {
-    params: { header: { 'Idempotency-Key': idempotencyKey } },
+  const { data, response } = await client.POST('/api/v1/inventory/adjust' as any, {
+    params: { header: { 'Idempotency-Key': idempotencyKey } } as any,
     body: {
       sku: input.sku,
       delta: input.delta,
       reason: input.reason,
-      expected_version: input.expected_version,
+      ...(input.expected_version !== undefined ? { expected_version: input.expected_version } : {}),
     },
     signal,
   });

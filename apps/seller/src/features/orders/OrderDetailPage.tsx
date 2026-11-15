@@ -14,7 +14,7 @@ import {
 import { getOrder, type DemoMode } from '../../mocks/mock-api';
 import { useRealtimeRefresh } from '../realtime/RealtimeProvider';
 import { useApiPage } from '../shared/useApiPage';
-import { ApiRequestError } from '../../core/api-error';
+import { ApiRequestError, presentApiError } from '../../core/api-error';
 import { getShopifyFulfillmentStatus, type ShopifyFulfillmentView } from '../../api/shopify';
 import { useAuth } from '../auth/AuthProvider';
 import { OrderDetailPanel } from './components/OrderDetailPanel';
@@ -22,6 +22,7 @@ import { OrderDetailHeader } from './components/OrderDetailHeader';
 import { OrderOverviewTab } from './components/OrderOverviewTab';
 import { OrderAuditTab } from './components/OrderAuditTab';
 import { OrderReturnsTab } from './components/OrderReturnsTab';
+import { OrderApiHistory } from './components/OrderApiHistory';
 import { OrderPrintDocuments, type OrderPrintKind } from './components/OrderPrintDocuments';
 import { toOrderApiRow, type ApiOrderTransitionTarget } from './order.api';
 import type { Order } from './order.types';
@@ -108,11 +109,6 @@ export function OrderDetailPage({ id, mode }: { id: string; mode: DemoMode }) {
     return next;
   };
 
-  // Cancellation Modal States
-  const [cancelModalOpen, setCancelModalOpen] = useState(false);
-  const [cancelReason, setCancelReason] = useState('');
-  const [cancelReasonError, setCancelReasonError] = useState('');
-
   // Payment Confirmation Modal States
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [printKind, setPrintKind] = useState<OrderPrintKind | null>(null);
@@ -173,32 +169,22 @@ export function OrderDetailPage({ id, mode }: { id: string; mode: DemoMode }) {
     }
   };
 
-  // Confirm Cancellation
-  const handleConfirmCancel = async () => {
-    if (!row) return;
-    const trimmed = cancelReason.trim();
-    if (!trimmed) {
-      setCancelReasonError('Vui lòng nhập lý do hủy đơn (bắt buộc).');
-      return;
-    }
-    if (trimmed.length > 500) {
-      setCancelReasonError('Lý do hủy không được vượt quá 500 ký tự.');
-      return;
-    }
-
+  // Confirm Cancellation — resolves to whether the server accepted the cancel, so the
+  // overview form can keep the typed reason when a retry is needed.
+  const handleCancelOrder = async (reason: string): Promise<boolean> => {
+    if (!row) return false;
     setBusy(true);
-    setCancelReasonError('');
     setTransitionError(null);
     try {
-      const idempotencyKey = transitionKeyFor('cancelled', trimmed);
-      await transitionOrder(row.id, { status: 'cancelled', reason: trimmed }, idempotencyKey);
-      transitionKeys.current.delete(`${id}:cancelled:${trimmed}`);
-      setCancelModalOpen(false);
-      setCancelReason('');
+      const idempotencyKey = transitionKeyFor('cancelled', reason);
+      await transitionOrder(row.id, { status: 'cancelled', reason }, idempotencyKey);
+      transitionKeys.current.delete(`${id}:cancelled:${reason}`);
       await page.revalidate();
       page.refresh();
+      return true;
     } catch (error) {
       setTransitionError(error instanceof ApiRequestError ? error : new Error((error as Error).message));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -222,7 +208,9 @@ export function OrderDetailPage({ id, mode }: { id: string; mode: DemoMode }) {
         }, idempotencyKey);
         wooPaymentKey.current = null;
       } else {
-        const idempotencyKey = `payment-manual-${row.id}-${Date.now()}`;
+        // The key is derived from the order alone and stays stable across retries until the
+        // modal inputs change, so a lost acknowledgement cannot record the same cash twice.
+        const idempotencyKey = `payment-ui-${row.id}`;
         await confirmOrderPayment(row.id, paymentNote.trim(), idempotencyKey);
       }
       setPaymentModalOpen(false);
@@ -250,7 +238,10 @@ export function OrderDetailPage({ id, mode }: { id: string; mode: DemoMode }) {
   }, [printKind]);
 
   return (
-    <section className="mx-auto flex w-full max-w-[1280px] flex-col gap-6 py-6 sm:py-8">
+    <section
+      className="mx-auto flex w-full max-w-[1280px] flex-col gap-6 py-6 sm:py-8"
+      aria-label={`Chi tiết ${row?.reference ?? fixtureOrder?.reference ?? id}`}
+    >
       {/* Screen Loading / Error / Empty States */}
       {page.loading ? <LoadingState label="Đang tải dữ liệu chi tiết đơn hàng…" /> : null}
       {!page.loading && page.fixtureError ? <ErrorState error={page.fixtureError} retry={page.refresh} /> : null}
@@ -268,11 +259,6 @@ export function OrderDetailPage({ id, mode }: { id: string; mode: DemoMode }) {
           <OrderDetailHeader
             order={row}
             onNextAction={handleNextAction}
-            onOpenCancelModal={() => {
-              setCancelReason('');
-              setCancelReasonError('');
-              setCancelModalOpen(true);
-            }}
             onPrintSale={() => setPrintKind('sale')}
             onPrintPacking={() => { if (canPrintPacking) setPrintKind('packing'); }}
             canPrintPacking={canPrintPacking}
@@ -280,7 +266,9 @@ export function OrderDetailPage({ id, mode }: { id: string; mode: DemoMode }) {
           />
           <OrderPrintDocuments order={row} kind={printKind} />
 
-          {/* Dismissible Inline Transition Error Banner (Does not hide the whole page) */}
+          {/* Dismissible Inline Transition Error Banner (Does not hide the whole page).
+              An API refusal presents the code's operator sentence — title, what to do next
+              and the request id — not the raw server string. */}
           {transitionError ? (
             <div
               role="alert"
@@ -291,14 +279,23 @@ export function OrderDetailPage({ id, mode }: { id: string; mode: DemoMode }) {
                   error
                 </span>
                 <div className="font-body text-caption">
-                  <strong className="block text-body-sm font-semibold text-danger">Thao tác chưa hoàn tất</strong>
+                  <strong className="block text-body-sm font-semibold text-danger">
+                    {transitionError instanceof ApiRequestError
+                      ? presentApiError(transitionError).title
+                      : 'Thao tác chưa hoàn tất'}
+                  </strong>
                   <p className="mt-0.5 text-on-surface">
                     {transitionError instanceof ApiRequestError
-                      ? transitionError.message
+                      ? presentApiError(transitionError).detail
                       : transitionError instanceof Error
                       ? transitionError.message
                       : 'Đã xảy ra lỗi trong quá trình xử lý đơn hàng.'}
                   </p>
+                  {transitionError instanceof ApiRequestError && presentApiError(transitionError).requestId ? (
+                    <p className="mt-1 font-mono text-[11px] text-graphite">
+                      Mã yêu cầu: {presentApiError(transitionError).requestId}
+                    </p>
+                  ) : null}
                 </div>
               </div>
               <Button size="sm" variant="ghost" onClick={() => setTransitionError(null)}>
@@ -324,11 +321,7 @@ export function OrderDetailPage({ id, mode }: { id: string; mode: DemoMode }) {
               <OrderOverviewTab
                 order={row}
                 onNextAction={handleNextAction}
-                onOpenCancelModal={() => {
-                  setCancelReason('');
-                  setCancelReasonError('');
-                  setCancelModalOpen(true);
-                }}
+                onCancel={(reason) => handleCancelOrder(reason)}
                 onOpenPaymentModal={() => {
                   setTransitionError(null);
                   setPaymentNote('');
@@ -382,95 +375,6 @@ export function OrderDetailPage({ id, mode }: { id: string; mode: DemoMode }) {
             </div>
           </Modal>
 
-          {/* Modal 1: Dedicated Cancellation Modal with ATS Inventory Warning */}
-          <Modal
-            open={cancelModalOpen}
-            onClose={() => {
-              if (!busy) {
-                setCancelModalOpen(false);
-                setCancelReasonError('');
-              }
-            }}
-            title={`Xác nhận hủy đơn hàng ${row.reference}`}
-            description="Thao tác hủy đơn sẽ hoàn trả số lượng hàng về kho khả dụng và không thể hoàn tác."
-            footer={
-              <div className="flex flex-wrap justify-end gap-2.5">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => {
-                    setCancelModalOpen(false);
-                    setCancelReasonError('');
-                  }}
-                >
-                  Quay lại
-                </Button>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  loading={busy}
-                  disabled={busy || cancelReason.trim().length === 0}
-                  onClick={handleConfirmCancel}
-                >
-                  Xác nhận hủy đơn
-                </Button>
-              </div>
-            }
-          >
-            <div className="grid gap-4">
-              {/* ATS Restock Warning */}
-              <div className="flex items-start gap-3 rounded-control border border-warning/40 bg-warning/10 p-3.5 text-on-surface">
-                <span className="material-symbols-outlined text-[20px] text-warning" aria-hidden="true">
-                  warning
-                </span>
-                <div className="font-body text-caption leading-relaxed">
-                  <strong className="block font-semibold text-warning">
-                    Cảnh báo tác động tồn kho (ATS):
-                  </strong>
-                  <p className="mt-0.5">
-                    Toàn bộ <strong>{row.itemCount} sản phẩm</strong> ({row.items.length} mặt hàng) đã giữ chỗ sẽ được tự động <strong>HOÀN TRẢ LẠI TỒN KHO KHẢ DỤNG (ATS)</strong>.
-                  </p>
-                  <p className="mt-1 text-graphite">
-                    Thao tác này sẽ ghi nhận lý do vào nhật ký kiểm toán và kích hoạt đồng bộ tồn kho tới các kênh bán đã kết nối.
-                  </p>
-                </div>
-              </div>
-
-              {/* Reason Input */}
-              <div className="grid gap-1.5">
-                <div className="flex items-center justify-between">
-                  <label
-                    htmlFor={`cancel-reason-input-${row.id}`}
-                    className="font-body text-caption font-semibold text-on-surface"
-                  >
-                    Lý do hủy đơn <span className="text-danger">*</span>
-                  </label>
-                  <span className="font-mono text-[11px] text-graphite">
-                    {cancelReason.length}/500
-                  </span>
-                </div>
-                <textarea
-                  id={`cancel-reason-input-${row.id}`}
-                  className="min-h-24 w-full rounded-control border border-outline-variant bg-pure-white p-3 font-body text-sm text-on-surface outline-none focus:border-channel-accent focus:ring-1 focus:ring-channel-accent"
-                  value={cancelReason}
-                  onChange={(e) => {
-                    setCancelReason(e.target.value);
-                    if (cancelReasonError && e.target.value.trim().length > 0) {
-                      setCancelReasonError('');
-                    }
-                  }}
-                  placeholder="Nhập lý do chi tiết: Khách yêu cầu hủy, hết hàng tại kho, sai lệch thông tin địa chỉ..."
-                  maxLength={500}
-                  disabled={busy}
-                />
-                {cancelReasonError ? (
-                  <span className="font-body text-caption text-danger">{cancelReasonError}</span>
-                ) : null}
-              </div>
-            </div>
-          </Modal>
-
           {/* Modal 2: Manual Payment Confirmation Modal */}
           <Modal
             open={paymentModalOpen}
@@ -492,7 +396,7 @@ export function OrderDetailPage({ id, mode }: { id: string; mode: DemoMode }) {
                 <Button variant="primary" size="sm" loading={busy}
                   disabled={busy || (row.channelCode === 'woocommerce' && (!paymentTransactionReference.trim() || !paymentReceivedChecked))}
                   onClick={handleConfirmPayment}>
-                  {row.channelCode === 'woocommerce' ? 'Xác nhận đã nhận tiền' : 'Xác nhận đã thu tiền'}
+                  {row.channelCode === 'woocommerce' ? 'Xác nhận đã nhận tiền' : 'Xác nhận đã thu'}
                 </Button>
               </div>
             }
@@ -547,6 +451,12 @@ export function OrderDetailPage({ id, mode }: { id: string; mode: DemoMode }) {
 
       {/* Demo / Mock Fixture View (Strictly separated from Live API) */}
       {fixtureOrder ? <OrderDetailPanel order={fixtureOrder} showAudit /> : null}
+
+      {/* Status history, fetched eagerly alongside the order so the answer is on screen with
+          the order itself. Only the real mode mounts it: a fixture dossier must not ask the
+          API about an order the server has never heard of, and once the fixture fallback has
+          taken over (fixtureError) there is no live order left to describe. */}
+      {mode === 'default' && !page.fixtureError ? <OrderApiHistory orderId={id} /> : null}
     </section>
   );
 }

@@ -19,7 +19,7 @@ import type { ProductStatus } from '../../api/products';
 export interface ProductApiVariant {
   id: string;
   sku: string;
-  title: string;
+  title?: string;
   color: string;
   colorDescription: string;
   size: string;
@@ -60,50 +60,52 @@ export interface ProductApiDetail {
   variants: ProductApiVariant[];
 }
 
-export function toProductApiDetail(detail: ProductDetail): ProductApiDetail {
-  const published = detail.status === 'active';
+export function toProductApiDetail(detail: ProductDetail | any): ProductApiDetail {
+  const published = detail.status === 'active' || detail.status === 'PUBLISHED';
+  const variants: any[] = Array.isArray(detail.variants) ? detail.variants : [];
+  const variantCount = detail.variantCount ?? detail.variant_count ?? variants.length;
+  const onHand = detail.onHand ?? detail.on_hand ?? variants.reduce((sum, v) => sum + (v.onHand ?? v.on_hand ?? 0), 0);
+  const reserved = detail.reserved ?? detail.reserved ?? variants.reduce((sum, v) => sum + (v.reserved ?? 0), 0);
+  const safetyBuffer = detail.safetyBuffer ?? detail.safety_buffer ?? variants.reduce((sum, v) => sum + (v.safetyBuffer ?? v.safety_buffer ?? 0), 0);
+  const availableToSell = detail.availableToSell ?? detail.available_to_sell ?? variants.reduce((sum, v) => sum + (v.availableToSell ?? v.available_to_sell ?? 0), 0);
+
   return {
-    id: detail.id,
-    // No revision exists on the Spring Boot product record.
-    productVersion: 0,
-    name: detail.name,
-    category: detail.category,
-    brand: '',
-    description: detail.description,
-    shortDescription: '',
-    attributes: {},
-    weightGrams: null,
-    lengthMM: null,
-    widthMM: null,
-    heightMM: null,
-    condition: '',
-    masterSku: '',
-    // Every variant of a product is created under the product's currency. Falling back to VND
-    // keeps a product with zero variants renderable; it never prices anything on its own.
-    currency: detail.variants[0]?.currency ?? 'VND',
-    status: detail.status,
-    // The totals are sums of server-owned per-variant values computed in the adapter. A second
-    // copy of the arithmetic here would be a second thing that can disagree with the first.
-    variantCount: detail.variantCount,
-    onHand: detail.onHand,
-    reserved: detail.reserved,
-    safetyBuffer: detail.safetyBuffer,
-    availableToSell: detail.availableToSell,
-    variants: detail.variants.map((variant) => ({
-      id: variant.id,
-      sku: variant.sku,
-      title: variant.title,
-      color: '',
-      colorDescription: '',
-      size: '',
-      priceMinor: variant.priceMinor,
-      barcode: '',
-      isActive: published,
-      variantIsActive: published,
-      onHand: variant.onHand,
-      reserved: variant.reserved,
-      safetyBuffer: variant.safetyBuffer,
-      availableToSell: variant.availableToSell,
+    id: String(detail.id ?? ''),
+    productVersion: detail.productVersion ?? detail.product_version ?? 0,
+    name: detail.name ?? '',
+    category: detail.category ?? '',
+    brand: detail.brand ?? '',
+    description: detail.description ?? '',
+    shortDescription: detail.shortDescription ?? detail.short_description ?? '',
+    attributes: detail.attributes ?? {},
+    weightGrams: detail.weightGrams ?? detail.weight_grams ?? null,
+    lengthMM: detail.lengthMM ?? detail.length_mm ?? null,
+    widthMM: detail.widthMM ?? detail.width_mm ?? null,
+    heightMM: detail.heightMM ?? detail.height_mm ?? null,
+    condition: detail.condition ?? '',
+    masterSku: detail.masterSku ?? detail.master_sku ?? '',
+    currency: detail.currency ?? variants[0]?.currency ?? 'VND',
+    status: detail.status === 'PUBLISHED' ? 'active' : (detail.status ?? 'draft'),
+    variantCount,
+    onHand,
+    reserved,
+    safetyBuffer,
+    availableToSell,
+    variants: variants.map((variant) => ({
+      id: String(variant.id ?? ''),
+      sku: variant.sku ?? '',
+      title: variant.title ?? (variant.color && variant.size ? `${variant.color} / ${variant.size}` : ''),
+      color: variant.color ?? '',
+      colorDescription: variant.colorDescription ?? variant.color_description ?? '',
+      size: variant.size ?? '',
+      priceMinor: variant.priceMinor !== undefined ? variant.priceMinor : (variant.price_minor ?? (variant.price !== undefined ? variant.price : null)),
+      barcode: variant.barcode ?? '',
+      isActive: variant.isActive ?? variant.is_active ?? published,
+      variantIsActive: variant.variantIsActive ?? variant.variant_is_active ?? published,
+      onHand: variant.onHand ?? variant.on_hand ?? 0,
+      reserved: variant.reserved ?? 0,
+      safetyBuffer: variant.safetyBuffer ?? variant.safety_buffer ?? 0,
+      availableToSell: variant.availableToSell ?? variant.available_to_sell ?? 0,
     })),
   };
 }
@@ -123,7 +125,7 @@ export function totalsAreConsistent(product: ProductApiDetail): boolean {
 }
 
 export function variantLabel(variant: ProductApiVariant): string {
-  if (variant.title.trim()) return variant.title;
+  if (variant.title?.trim()) return variant.title;
   const parts = [variant.color, variant.size].filter((part) => part && part !== '—');
   return parts.length > 0 ? parts.join(' · ') : '—';
 }

@@ -31,6 +31,12 @@ export function createApiClient(baseUrl: string = apiBase()) {
       const request = new Request(original, { headers, credentials: isNativeSession() ? 'omit' : 'include' });
       const response = await globalThis.fetch(request);
       if (response.status === 401) notifyUnauthorized(requestGeneration);
+      try {
+        const cloned = response.clone();
+        (response as any)._clone = cloned;
+      } catch {
+        // Body may not be cloneable
+      }
       return response;
     },
     headers: { Accept: 'application/json' },
@@ -55,5 +61,11 @@ export async function apiFetch(path: string, init: RequestInit = {}, baseUrl: st
     credentials: isNativeSession() ? 'omit' : 'include',
   }));
   if (response.status === 401) notifyUnauthorized(requestGeneration);
+  try {
+    const cloned = response.clone();
+    (response as any)._clone = cloned;
+  } catch {
+    // Body may not be cloneable
+  }
   return response;
 }

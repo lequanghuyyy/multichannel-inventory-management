@@ -63,7 +63,7 @@ export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
 
         <section className="login-card" aria-labelledby="login-title">
           <div className="login-card__heading">
-            <h2 id="login-title">Đăng nhập OctoFlow</h2>
+            <h2 id="login-title">Đăng nhập vào hệ thống</h2>
             <p>Sử dụng email và mật khẩu tài khoản được cấp.</p>
           </div>
 

@@ -12,17 +12,23 @@ export function ProductLifecycle({ availableToSell, canWrite, disabledReason, on
   const [error, setError] = useState<string | null>(null);
   const attempt = useRef<{ operation: string; key: string } | null>(null);
   const options = PRODUCT_TRANSITIONS[status] ?? [];
+
   const move = async (next: ProductStatus) => {
     const operation = `${productId}:${status}:${next}`;
     if (!attempt.current || attempt.current.operation !== operation) attempt.current = { operation, key: newIdempotencyKey('product-lifecycle') };
-    setBusy(next); setError(null);
+    setBusy(next);
+    setError(null);
     try {
       await transitionProduct(productId, next, attempt.current.key);
       attempt.current = null;
       onTransitioned();
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Không chuyển được trạng thái.'); }
-    finally { setBusy(null); }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Không chuyển được trạng thái.');
+    } finally {
+      setBusy(null);
+    }
   };
+
   return (
     <section aria-label="Vòng đời sản phẩm" className="rounded-card border border-line bg-white p-5">
       <h2 className="font-display text-lg font-bold text-on-surface">Vòng đời sản phẩm</h2>

@@ -31,11 +31,21 @@ export function productRowsCsv(rows: readonly ProductApiRow[]): string {
   })));
 }
 
-export function downloadProductCsv(rows: readonly (ProductApiRow | ProductExportRecord)[], filename = 'products.csv'): void {
+export function downloadProductCsv(rows: readonly (ProductApiRow | ProductExportRecord | ProductSummary)[], filename = 'products.csv'): void {
   const records: ProductExportRecord[] = rows.map((row) => {
-    if (!('variantCount' in row)) return row;
-    return { name: row.name, master_sku: row.masterSku, category: row.category, brand: row.brand, status: row.status,
-      variant_count: row.variantCount, on_hand: row.onHand, reserved: row.reserved, safety_buffer: row.safetyBuffer, available_to_sell: row.availableToSell };
+    if ('variant_count' in row) return row;
+    return {
+      name: row.name,
+      master_sku: 'masterSku' in row ? row.masterSku : undefined,
+      category: row.category,
+      brand: 'brand' in row ? row.brand : undefined,
+      status: row.status,
+      variant_count: row.variantCount,
+      on_hand: row.onHand,
+      reserved: row.reserved,
+      safety_buffer: row.safetyBuffer,
+      available_to_sell: row.availableToSell,
+    };
   });
   const blob = new Blob([productExportCsv(records)], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);

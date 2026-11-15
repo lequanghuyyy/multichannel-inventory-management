@@ -106,7 +106,7 @@ export async function getChannelSettings(channelId: string, signal?: AbortSignal
 }
 export async function reconcileChannelListing(channelId: string, listingId: string) {
   const client = createApiClient();
-  return requestData<InventoryReconciliation>(await client.POST('/api/v1/channels/{channelId}/inventory/{listingId}/reconcile', { params: { path: { channelId, listingId } }, cache: 'no-store' }), 'Không thể đối soát listing.');
+  return requestData<InventoryReconciliation>(await client.POST('/api/v1/channels/{channelId}/inventory/{listingId}/reconcile', { params: { path: { channelId: Number(channelId), listingId: Number(listingId) } }, cache: 'no-store' }), 'Không thể đối soát listing.');
 }
 export async function resyncChannelListing(channelId: string, listingId: string, key: string, expected?: { quantity: number; version: number }) {
   if (expected) {

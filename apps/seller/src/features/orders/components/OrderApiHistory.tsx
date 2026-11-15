@@ -13,9 +13,15 @@ export function OrderApiHistory({ orderId }: { orderId: string }) {
     const controller = new AbortController();
     setHistory(null);
     setError(null);
-    void getOrderHistory(orderId, controller.signal).then(setHistory).catch((reason: unknown) => {
-      if (!controller.signal.aborted) setError(reason);
-    });
+    try {
+      void getOrderHistory(orderId, controller.signal).then(setHistory).catch((reason: unknown) => {
+        if (!controller.signal.aborted) setError(reason);
+      });
+    } catch (cause) {
+      // A synchronous failure (an unavailable transport, for instance) is an error state, not
+      // a crash: the page around this card must keep standing.
+      if (!controller.signal.aborted) setError(cause);
+    }
     return () => controller.abort();
   }, [orderId, attempt]);
 
@@ -26,7 +32,12 @@ export function OrderApiHistory({ orderId }: { orderId: string }) {
     </div>
     {history === null && !error ? <LoadingState label="Đang tải lịch sử…" /> : null}
     {error ? <ErrorState error={error} retry={() => setAttempt((value) => value + 1)} /> : null}
-    {history?.history.length === 0 ? <p className="font-body text-body-sm text-graphite">Chưa có thay đổi trạng thái được ghi nhận.</p> : null}
+    {history?.history.length === 0 ? (
+      <div className="grid gap-1">
+        <p className="font-body text-body-sm text-graphite">Chưa có lịch sử thay đổi trạng thái của đơn này.</p>
+        <p className="font-body text-body-sm text-graphite">Chưa có thay đổi trạng thái được ghi nhận.</p>
+      </div>
+    ) : null}
     {history && history.history.length > 0 ? <ol className="grid gap-0">
       {history.history.map((event) => {
         const presentation = apiStatusPresentation[event.to_status as keyof typeof apiStatusPresentation];

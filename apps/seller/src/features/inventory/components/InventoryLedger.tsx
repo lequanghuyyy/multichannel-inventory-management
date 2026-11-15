@@ -4,6 +4,7 @@ import { Card } from '../../../components/ui/Card';
 import { Checkbox } from '../../../components/ui/Checkbox';
 import { ProductThumbnail } from '../../../components/common/ProductThumbnail';
 import { cn } from '../../../lib/cn';
+import type { DataSource } from '../../shared/useApiPage';
 import type { InventoryLedgerRow, InventoryStatus, InventorySyncState } from '../inventory.types';
 
 const statusPresentation: Record<InventoryStatus, { label: string; tone: 'success' | 'warning' | 'danger' }> = {
@@ -37,6 +38,9 @@ export interface InventoryLedgerProps {
   hasMore: boolean;
   loadingMore: boolean;
   loadMoreError: unknown;
+  /** The cursor pager ("Tải thêm" / end-of-list note) only applies to live API rows. */
+  source: DataSource;
+  onLoadMore: () => void;
   currentPage: number;
   totalPages: number;
   canGoForward: boolean;
@@ -50,7 +54,7 @@ export interface InventoryLedgerProps {
   priceLabel?: (row: InventoryLedgerRow) => string;
 }
 
-export function InventoryLedger({ onInspect, onOpenDetail, onToggle, onToggleAll, onPageChange, priceLabel, rows, totalRows, selectedIds, hasMore, loadingMore, loadMoreError, currentPage, totalPages, canGoForward }: InventoryLedgerProps) {
+export function InventoryLedger({ onInspect, onOpenDetail, onToggle, onToggleAll, onPageChange, priceLabel, rows, totalRows, selectedIds, hasMore, loadingMore, loadMoreError, source, onLoadMore, currentPage, totalPages, canGoForward }: InventoryLedgerProps) {
   const allVisibleSelected = rows.length > 0 && rows.every((row) => selectedIds.has(row.id));
   return (
     <Card className="overflow-hidden p-0">
@@ -97,14 +101,36 @@ export function InventoryLedger({ onInspect, onOpenDetail, onToggle, onToggleAll
       </div>
       <footer className="flex flex-col justify-between gap-3 border-t border-outline-variant/50 bg-surface-container-low/50 px-5 py-4 sm:flex-row sm:items-center">
         <div className="grid gap-1">
-          <p className="font-body text-caption text-graphite">Trang này hiển thị tối đa 20 SKU.</p>
+          <p className="font-body text-caption text-graphite">Trang này hiển thị tối đa 50 SKU.</p>
+          {/* Cursor-pager states are live-API facts. The fixture's pager is a stub, so it
+              never claims an end of list it did not walk to. */}
+          {source === 'api' && !hasMore && !loadMoreError ? <p className="font-body text-caption text-graphite">Đã hiển thị hết.</p> : null}
           {loadMoreError ? <p role="alert" className="font-body text-caption text-error">Không tải thêm được. Các dòng ở trên vẫn đúng.</p> : null}
         </div>
-        <nav className="flex items-center justify-between gap-3 sm:justify-end" aria-label="Phân trang tồn kho">
-          <Button variant="secondary" size="sm" disabled={currentPage <= 1 || loadingMore} onClick={() => onPageChange(currentPage - 1)} aria-label="Trang trước">← Trước</Button>
-          <span className="min-w-max font-body text-caption font-semibold text-on-surface" aria-live="polite">Trang {currentPage}{hasMore ? ' · còn dữ liệu' : ` / ${totalPages}`}</span>
-          <Button variant="secondary" size="sm" disabled={!canGoForward || loadingMore} loading={loadingMore} loadingLabel="Đang tải…" onClick={() => onPageChange(currentPage + 1)} aria-label="Trang sau">Sau →</Button>
-        </nav>
+        <div className="flex flex-wrap items-center justify-between gap-3 sm:justify-end">
+          {source === 'api' && hasMore ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={loadingMore}
+              loading={loadingMore}
+              loadingLabel="Đang tải…"
+              onClick={onLoadMore}
+            >
+              Tải thêm
+            </Button>
+          ) : null}
+          <nav className="flex items-center justify-between gap-3 sm:justify-end" aria-label="Phân trang tồn kho">
+            <Button variant="secondary" size="sm" disabled={currentPage <= 1 || loadingMore} onClick={() => onPageChange(currentPage - 1)} aria-label="Trang trước">← Trước</Button>
+            <span className="min-w-max font-body text-caption font-semibold text-on-surface" aria-live="polite">Trang {currentPage}{hasMore ? ' · còn dữ liệu' : ` / ${totalPages}`}</span>
+            {/* In live mode a "Sau" button with nothing behind it is indistinguishable from
+                "the next page has not loaded yet" — omitting next_cursor ends the walk, so
+                the control goes away. The fixture keeps its stub pager, disabled at both ends. */}
+            {source === 'api' && !canGoForward ? null : (
+              <Button variant="secondary" size="sm" disabled={!canGoForward || loadingMore} loading={loadingMore} loadingLabel="Đang tải…" onClick={() => onPageChange(currentPage + 1)} aria-label="Trang sau">Sau →</Button>
+            )}
+          </nav>
+        </div>
       </footer>
     </Card>
   );

@@ -9,6 +9,14 @@ const statusLabels: Record<string, string> = { connected: 'Đang kết nối', d
 const statusTone: Record<string, 'neutral' | 'success' | 'warning' | 'danger'> = { connected: 'success', disconnected: 'neutral', syncing: 'warning', error: 'danger' };
 const typeLabels: Record<string, string> = { marketplace: 'Sàn thương mại điện tử', pos: 'Bán tại quầy', website: 'Website', simulator: 'Kênh giả lập' };
 
+function environmentLabel(env?: string): string {
+  if (!env) return '';
+  if (env === 'simulated' || env === 'simulation') return 'Simulator';
+  if (env === 'sandbox') return 'Sandbox';
+  if (env === 'production') return 'Production';
+  return env;
+}
+
 function isSimulator(channel: Channel): boolean {
   return channel.type === 'simulator' || channel.environment === 'simulated';
 }
@@ -36,9 +44,22 @@ function ChannelRows({ channels, onOpen }: { channels: Channel[]; onOpen: (id: s
         <thead><tr className="h-11 bg-surface-container-low font-body text-caption font-semibold uppercase tracking-wider text-graphite"><th className="px-5">Kênh / shop</th><th className="px-3">Loại kênh</th><th className="px-3">Kết nối</th><th className="px-3 text-right">SKU đã ghép</th><th className="px-3">Đồng bộ gần nhất</th><th className="px-5 text-right"><span className="sr-only">Thao tác</span></th></tr></thead>
         <tbody className="divide-y divide-surface-container">{channels.map((channel) => <tr key={channel.id} className="font-body text-body-sm">
           <td className="px-5 py-3"><ChannelIdentity channel={channel} /></td>
-          <td className="px-3 py-3 text-on-surface-variant">{typeLabels[channel.type] ?? 'Kênh bán'}</td>
-          <td className="px-3 py-3"><StatusBadge tone={isSimulator(channel) ? 'warning' : statusTone[channel.status] ?? 'neutral'}>{isSimulator(channel) ? 'Mô phỏng' : statusLabels[channel.status] ?? 'Đang cập nhật'}</StatusBadge>{channel.last_error ? <span className="mt-1 block max-w-56 text-caption text-error">{channelErrorMessage(channel.last_error)}</span> : null}</td>
-          <td className="px-3 py-3 text-right tabular-nums text-on-surface-variant">{channel.mapping_count.toLocaleString('vi-VN')}</td>
+          <td className="px-3 py-3 text-on-surface-variant">
+            <div>{typeLabels[channel.type] ?? 'Kênh bán'}</div>
+            <span className="text-caption text-graphite">{environmentLabel(channel.environment)}</span>
+          </td>
+          <td className="px-3 py-3">
+            <StatusBadge tone={isSimulator(channel) ? 'warning' : statusTone[channel.status] ?? 'neutral'}>
+              {isSimulator(channel) ? 'Mô phỏng' : statusLabels[channel.status] ?? 'Đang cập nhật'}
+            </StatusBadge>
+            {channel.last_error ? (
+              <span className="mt-1 block max-w-56 text-caption text-error">
+                {channelErrorMessage(channel.last_error)}
+                <code className="mt-0.5 block font-mono text-[11px] text-error">{channel.last_error}</code>
+              </span>
+            ) : null}
+          </td>
+          <td className="px-3 py-3 text-right tabular-nums text-on-surface-variant">{channel.mapping_count !== undefined ? channel.mapping_count.toLocaleString('vi-VN') : '—'}</td>
           <td className="px-3 py-3 text-caption text-graphite">{timeLabel(channel.last_sync)}</td>
           <td className="px-5 py-3 text-right"><Button variant="secondary" size="sm" onClick={() => onOpen(channel.id)}>Quản lý kênh</Button></td>
         </tr>)}</tbody>
@@ -46,8 +67,8 @@ function ChannelRows({ channels, onOpen }: { channels: Channel[]; onOpen: (id: s
     </div>
     <div className="grid gap-3 p-3 lg:hidden">{channels.map((channel) => <article key={channel.id} className="grid min-w-0 gap-3 rounded-card border border-outline-variant/50 bg-pure-white p-4">
       <div className="flex min-w-0 items-start justify-between gap-3"><ChannelIdentity channel={channel} /><StatusBadge tone={isSimulator(channel) ? 'warning' : statusTone[channel.status] ?? 'neutral'}>{isSimulator(channel) ? 'Mô phỏng' : statusLabels[channel.status] ?? 'Đang cập nhật'}</StatusBadge></div>
-      <div className="grid grid-cols-2 gap-3 border-t border-outline-variant/50 pt-3 text-caption"><div><span className="block text-graphite">Loại kênh</span><strong className="mt-1 block text-on-surface">{typeLabels[channel.type] ?? 'Kênh bán'}</strong></div><div><span className="block text-graphite">SKU đã ghép</span><strong className="mt-1 block tabular-nums text-on-surface">{channel.mapping_count.toLocaleString('vi-VN')}</strong></div><div><span className="block text-graphite">Đồng bộ gần nhất</span><strong className="mt-1 block text-on-surface">{timeLabel(channel.last_sync)}</strong></div></div>
-      {channel.last_error ? <p className="break-words text-caption text-error">{channelErrorMessage(channel.last_error)}</p> : null}<Button variant="secondary" size="sm" onClick={() => onOpen(channel.id)}>Quản lý kênh</Button>
+      <div className="grid grid-cols-2 gap-3 border-t border-outline-variant/50 pt-3 text-caption"><div><span className="block text-graphite">Loại kênh</span><strong className="mt-1 block text-on-surface">{typeLabels[channel.type] ?? 'Kênh bán'} · {environmentLabel(channel.environment)}</strong></div><div><span className="block text-graphite">SKU đã ghép</span><strong className="mt-1 block tabular-nums text-on-surface">{channel.mapping_count !== undefined ? channel.mapping_count.toLocaleString('vi-VN') : '—'}</strong></div><div><span className="block text-graphite">Đồng bộ gần nhất</span><strong className="mt-1 block text-on-surface">{timeLabel(channel.last_sync)}</strong></div></div>
+      {channel.last_error ? <div className="text-caption text-error"><p className="break-words">{channelErrorMessage(channel.last_error)}</p><code className="mt-0.5 block font-mono text-[11px] text-error">{channel.last_error}</code></div> : null}<Button variant="secondary" size="sm" onClick={() => onOpen(channel.id)}>Quản lý kênh</Button>
     </article>)}</div>
   </>;
 }

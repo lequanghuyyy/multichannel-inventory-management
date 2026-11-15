@@ -17,6 +17,7 @@ import { InventoryReservationsPanel } from './components/detail/InventoryReserva
 import { InventoryReceiptsPanel } from './components/detail/InventoryReceiptsPanel';
 import { InventoryChannelEvidence } from './components/detail/InventoryChannelEvidence';
 import { useInventoryDetailSnapshot } from './hooks/useInventoryDetailSnapshot';
+import { useInventoryAdjustmentLedger } from './hooks/useInventoryAdjustmentLedger';
 import { useInventoryMovements } from './hooks/useInventoryMovements';
 import { useInventoryChannelEvidence } from './hooks/useInventoryChannelEvidence';
 import type { InventoryDetailFixture } from './inventory-detail.types';
@@ -38,7 +39,8 @@ export function InventoryDetailPage({ mode, sku, canAdjust = true, canManageChan
   const liveMode = mode === 'default';
   const movementEnabled = liveMode && activeTab === 'movements';
   const channelEnabled = liveMode && Boolean(live.snapshot?.product_id) && (activeTab === 'overview' || activeTab === 'channels');
-  const ledger = useInventoryMovements(sku, movementEnabled);
+  const ledger = useInventoryAdjustmentLedger(sku);
+  const movements = useInventoryMovements(sku, movementEnabled);
   const channels = useInventoryChannelEvidence(sku, live.snapshot?.product_id ?? '', channelEnabled);
   const error = liveMode ? null : fixtureError;
   const loading = liveMode ? live.state === 'loading' : fixtureLoading;
@@ -53,6 +55,7 @@ export function InventoryDetailPage({ mode, sku, canAdjust = true, canManageChan
   useRealtimeRefresh(['inventory', 'sync'], () => {
     live.revalidate();
     ledger.revalidate();
+    movements.revalidate();
     channels.revalidate();
     setRefreshToken((value) => value + 1);
   }, {
@@ -60,12 +63,12 @@ export function InventoryDetailPage({ mode, sku, canAdjust = true, canManageChan
     pollWhileDegradedMs: 15_000,
   });
 
-  const submitAdjustment = async ({ countedOnHand, expectedVersion, reason }: AdjustmentFormValue) => {
+  const submitAdjustment = async ({ delta, reason }: AdjustmentFormValue) => {
+    if (adjustmentSubmitting) return;
     const current = live.snapshot;
     if (!current) return;
-    const delta = countedOnHand - current.on_hand;
     if (delta === 0) return;
-    const fingerprint = `${countedOnHand}|${expectedVersion}|${reason}`;
+    const fingerprint = `${delta}|${reason}`;
     const attempt = adjustmentAttempt.current;
     const key = attempt?.fingerprint === fingerprint
       ? attempt.key
@@ -75,7 +78,7 @@ export function InventoryDetailPage({ mode, sku, canAdjust = true, canManageChan
     setAdjustmentError(null);
     setAdjustmentResult(null);
     try {
-      const result = await adjustInventory({ sku, delta, reason, expected_version: expectedVersion }, key);
+      const result = await adjustInventory({ sku, delta, reason }, key);
       adjustmentAttempt.current = null;
       setAdjustmentResult(result);
       setAdjustmentOpen(false);
@@ -106,10 +109,10 @@ export function InventoryDetailPage({ mode, sku, canAdjust = true, canManageChan
     document.getElementById(`inventory-detail-tab-${next.id}`)?.focus();
   };
 
-  if (loading) return <section className="mx-auto grid w-full max-w-[1200px] gap-6 py-8"><PageHeader eyebrow="KHO / CHI TIẾT SKU" title="Chi tiết tồn kho" description="Đang tải thông tin SKU…" /><LoadingState /></section>;
+  if (loading) return <section className="mx-auto grid w-full max-w-[1200px] gap-6 py-8"><PageHeader eyebrow="KHO / CHI TIẾT SKU" title="Chi tiết tồn kho" description="Đang tải thông tin SKU…" /><LoadingState label="Đang tải dữ liệu tồn kho…" /></section>;
   if (error) return <section className="mx-auto grid w-full max-w-[1200px] gap-6 py-8"><PageHeader eyebrow="KHO / CHI TIẾT SKU" title="Chi tiết tồn kho" description="Không thể đọc thông tin SKU." /><ErrorState error={error} retry={refreshFixture} /></section>;
   if (live.error && !live.snapshot) return <section className="mx-auto grid w-full max-w-[1200px] gap-6 py-8"><Button variant="ghost" onClick={() => navigate('/inventory')} className="justify-self-start">← Kho</Button><ErrorState error={live.error} retry={live.refresh} /></section>;
-  if (!detail || !live.snapshot && liveMode) return <section className="mx-auto grid w-full max-w-[1200px] gap-6 py-8"><Button variant="ghost" onClick={() => navigate('/inventory')} className="justify-self-start">← Kho</Button><EmptyState title="Không tìm thấy SKU" detail={`Chưa có dữ liệu tồn kho của SKU ${sku}.`} /></section>;
+  if (!detail || (!live.snapshot && liveMode)) return <section className="mx-auto grid w-full max-w-[1200px] gap-6 py-8"><Button variant="ghost" onClick={() => navigate('/inventory')} className="justify-self-start">← Kho</Button><EmptyState title="Không tìm thấy SKU" detail={`Chưa có dữ liệu tồn kho của SKU ${sku}.`} /></section>;
 
   const stock = liveMode
     ? { onHand: live.snapshot!.on_hand, reserved: live.snapshot!.reserved, safetyBuffer: live.snapshot!.safety_buffer, availableToSell: live.snapshot!.available_to_sell }
@@ -122,7 +125,9 @@ export function InventoryDetailPage({ mode, sku, canAdjust = true, canManageChan
       <InventoryDetailHeader detail={detail} source={liveMode ? 'core' : 'fixture'} onAdjust={() => { setAdjustmentError(null); setAdjustmentOpen(true); }} adjustmentDisabled={adjustmentSubmitting || live.state !== 'success' || Boolean(live.error)} canAdjust={mayAdjust} canCreateReceipt={liveMode && canCreateReceipt} />
       {live.error && live.snapshot ? <div role="status" className="flex flex-wrap items-center justify-between gap-3 rounded-control border border-amber-300 bg-amber-50 px-4 py-3 font-body text-body-sm text-amber-900"><span>Đang hiển thị snapshot tồn gần nhất; lần xác minh mới nhất thất bại.</span><Button variant="secondary" size="sm" onClick={live.revalidate}>Thử tải lại</Button></div> : null}
       {adjustmentResult ? <div role="status" className="rounded-control border border-emerald-300 bg-emerald-50 px-4 py-3 font-body text-body-sm text-emerald-950"><strong>Đã ghi nhận điều chỉnh từ máy chủ.</strong><p className="mt-1">Tồn trong hệ thống: {adjustmentResult.on_hand.toLocaleString('vi-VN')} chiếc · Có thể bán: {adjustmentResult.available_to_sell.toLocaleString('vi-VN')} chiếc · Phiên bản {adjustmentResult.version}.</p></div> : null}
-      <InventoryAnchorMetrics stock={stock} source={liveMode ? 'api' : 'fixture'} version={dataVersion} apiState={liveMode ? live.state : 'success'} onRetry={live.revalidate} updatedAt={updatedAt} />
+      <section aria-label="Stock snapshot">
+        <InventoryAnchorMetrics stock={stock} source={liveMode ? 'api' : 'fixture'} version={dataVersion} apiState={liveMode ? live.state : 'success'} onRetry={live.revalidate} updatedAt={updatedAt} />
+      </section>
 
       <nav className="flex min-w-0 gap-1 overflow-x-auto border-b border-outline-variant/60" role="tablist" aria-label="Thông tin tồn kho SKU">
         {detailTabs.map((tab) => <button key={tab.id} id={`inventory-detail-tab-${tab.id}`} type="button" role="tab" aria-selected={activeTab === tab.id} aria-controls="inventory-detail-panel" tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => selectTab(tab.id)} onKeyDown={handleTabKey} className={`flex min-h-11 shrink-0 items-center gap-2 border-b-2 px-4 font-body text-sm font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${activeTab === tab.id ? 'border-channel-accent text-on-surface' : 'border-transparent text-graphite hover:text-on-surface'}`}><span className="material-symbols-outlined text-lg" aria-hidden="true">{tab.icon}</span>{tab.label}</button>)}
@@ -131,18 +136,119 @@ export function InventoryDetailPage({ mode, sku, canAdjust = true, canManageChan
       <div id="inventory-detail-panel" role="tabpanel" tabIndex={0} aria-labelledby={`inventory-detail-tab-${activeTab}`} className="min-w-0 outline-none">
         {activeTab === 'overview' ? liveMode ? <div className="grid gap-5">
           <InventoryStockAlerts onHand={stock.onHand} reserved={stock.reserved} safetyBuffer={stock.safetyBuffer} available={stock.availableToSell} />
+          <InventoryAdjustmentHistoryCard entries={ledger.entries} error={ledger.error} loading={ledger.state === 'loading'} onRetry={ledger.refresh} sku={sku} />
           <div className="grid items-start gap-5 lg:grid-cols-2"><InventoryReservationsPanel sku={sku} variantId={live.snapshot!.variant_id} reserved={stock.reserved} refreshToken={refreshToken} /><InventoryReceiptsPanel sku={sku} canCreate={canCreateReceipt} refreshToken={refreshToken} /></div>
           <InventoryChannelEvidence entries={channels.entries} error={channels.error} loading={channels.loading} refreshing={channels.refreshing} onRefresh={channels.refresh} onViewDetails={() => selectTab('channels')} canManage={canManageChannels} view="summary" />
           <InventoryVelocityCard />
         </div> : <div className="grid gap-5"><Card className="p-5"><p className="font-body text-body-sm text-graphite">Thông tin mẫu · dữ liệu này không phản ánh tồn kho hoặc reservation đang vận hành.</p></Card><InventoryVelocityCard /></div> : null}
 
-        {activeTab === 'movements' ? liveMode ? <InventoryMovementTimeline entries={ledger.entries} error={ledger.error} filters={ledger.filters} loading={ledger.state === 'loading'} loadingMore={ledger.loadingMore} nextCursor={ledger.nextCursor} onFilterChange={ledger.setFilters} onLoadMore={() => void ledger.loadMore()} onRetry={ledger.refresh} sku={detail.sku} /> : <EmptyState title="Chưa có lịch sử mẫu" detail="Biến động tồn chỉ hiển thị trong chế độ dữ liệu thật." /> : null}
+        {activeTab === 'movements' ? liveMode ? <InventoryMovementTimeline entries={movements.entries} error={movements.error} filters={movements.filters} loading={movements.state === 'loading'} loadingMore={movements.loadingMore} nextCursor={movements.nextCursor} onFilterChange={movements.setFilters} onLoadMore={() => void movements.loadMore()} onRetry={movements.refresh} sku={detail.sku} /> : <EmptyState title="Chưa có lịch sử mẫu" detail="Biến động tồn chỉ hiển thị trong chế độ dữ liệu thật." /> : null}
 
         {activeTab === 'channels' ? liveMode ? <InventoryChannelEvidence entries={channels.entries} error={channels.error} loading={channels.loading} refreshing={channels.refreshing} onRefresh={channels.refresh} canManage={canManageChannels} /> : <EmptyState title="Chưa có dữ liệu kênh bán mẫu" detail="Tab này chỉ hiển thị các listing và bằng chứng đồng bộ từ backend." /> : null}
       </div>
 
       {mayAdjust ? <InventoryAdjustmentModal open={adjustmentOpen} sku={sku} currentOnHand={live.snapshot!.on_hand} version={live.snapshot!.version} submitting={adjustmentSubmitting} error={adjustmentError} onClose={() => setAdjustmentOpen(false)} onSubmit={(value) => void submitAdjustment(value)} /> : null}
     </section>
+  );
+}
+
+function InventoryAdjustmentHistoryCard({
+  entries,
+  error,
+  loading,
+  onRetry,
+  sku,
+}: {
+  entries: ReturnType<typeof useInventoryAdjustmentLedger>['entries'];
+  error: unknown;
+  loading: boolean;
+  onRetry: () => void;
+  sku: string;
+}) {
+  return (
+    <Card className="overflow-hidden p-0">
+      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-outline-variant/50 p-5 sm:p-6">
+        <div>
+          <h2 className="font-display text-xl font-bold text-on-surface">Nhật ký thay đổi tồn kho</h2>
+          <p className="mt-1 font-body text-body-sm text-graphite">Adjustment history đọc từ backend, newest first.</p>
+        </div>
+        <Button variant="secondary" size="sm" onClick={onRetry} loading={loading}>
+          Làm mới
+        </Button>
+      </header>
+      <div className="border-b border-outline-variant/30 bg-surface-container-low/40 px-5 py-2 font-body text-caption text-graphite">
+        Cơ chế PostgreSQL row locking đảm bảo tính nhất quán của số liệu tồn kho.
+      </div>
+      {loading && entries.length === 0 ? (
+        <div className="p-5">
+          <LoadingState label="Đang tải nhật ký điều chỉnh…" />
+        </div>
+      ) : null}
+      {!loading && error && entries.length === 0 ? (
+        <div className="p-5">
+          <ErrorState error={error} retry={onRetry} />
+        </div>
+      ) : null}
+      {!loading && !error && entries.length === 0 ? (
+        <p className="p-6 font-body text-body-sm text-graphite">SKU này chưa có biến động tồn kho.</p>
+      ) : null}
+      {entries.length > 0 ? (
+        <>
+          <div className="px-5 py-3 font-body text-caption text-graphite">
+            Hiển thị {entries.length} adjustment từ server.
+          </div>
+          <div className="hidden overflow-x-auto md:block">
+            <table className="w-full min-w-[700px] border-collapse text-left">
+              <caption className="sr-only">Nhật ký thay đổi tồn kho của {sku}</caption>
+              <thead>
+                <tr className="h-10 bg-surface-container-low font-body text-caption font-semibold uppercase tracking-wider text-graphite">
+                  <th className="px-5">Thời gian</th>
+                  <th className="px-4">Thay đổi</th>
+                  <th className="px-4">Trước → Sau</th>
+                  <th className="px-4">Lý do</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-surface-container">
+                {entries.map((entry) => (
+                  <tr className="font-body text-body-sm hover:bg-surface-container-low/50" key={entry.id}>
+                    <td className="whitespace-nowrap px-5 py-4 text-caption text-graphite">
+                      {entry.created_at ? new Intl.DateTimeFormat('vi-VN', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date(entry.created_at)) : '—'}
+                    </td>
+                    <td className="px-4 py-4">
+                      <strong className={`font-mono ${entry.delta < 0 ? 'text-error' : 'text-badge-progress-text'}`}>
+                        {entry.delta > 0 ? `+${entry.delta}` : entry.delta}
+                      </strong>
+                    </td>
+                    <td className="px-4 py-4 font-mono text-caption text-graphite">
+                      {entry.on_hand_before} → {entry.on_hand_after}
+                    </td>
+                    <td className="px-4 py-4 font-body text-body-sm text-on-surface">
+                      {entry.reason}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="grid gap-3 p-4 md:hidden">
+            {entries.map((entry) => (
+              <article className="grid gap-2 rounded-card bg-surface-container-low p-4 font-body text-body-sm" key={entry.id}>
+                <div className="flex items-center justify-between">
+                  <strong className={`font-mono ${entry.delta < 0 ? 'text-error' : 'text-badge-progress-text'}`}>
+                    {entry.delta > 0 ? `+${entry.delta}` : entry.delta} chiếc
+                  </strong>
+                  <span className="text-caption text-graphite">
+                    {entry.created_at ? new Intl.DateTimeFormat('vi-VN', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date(entry.created_at)) : '—'}
+                  </span>
+                </div>
+                <p className="text-on-surface">{entry.reason}</p>
+                <p className="font-mono text-caption text-graphite">Tồn: {entry.on_hand_before} → {entry.on_hand_after}</p>
+              </article>
+            ))}
+          </div>
+        </>
+      ) : null}
+    </Card>
   );
 }
 
@@ -159,19 +265,19 @@ function InventoryStockAlerts({ onHand, reserved, safetyBuffer, available }: { o
 }
 
 function detailFromInventorySnapshot(snapshot: InventorySnapshot): InventoryDetailFixture {
-  const category = snapshot.category || 'Chưa phân loại';
-  const icon = category === 'APPAREL' ? 'checkroom' : category === 'FOOTWEAR' ? 'steps' : 'inventory_2';
+  const category = 'Chưa phân loại';
+  const icon = 'inventory_2';
   return {
     sku: snapshot.sku,
     productName: snapshot.product_name || snapshot.sku,
     category,
-    color: snapshot.color || '—',
-    size: snapshot.size || '—',
+    color: snapshot.variant_title || '—',
+    size: '—',
     productId: snapshot.product_id,
     variantId: snapshot.variant_id,
-    primaryMediaId: snapshot.primary_media_id,
-    productStatus: snapshot.product_status,
-    isActive: snapshot.is_active,
+    primaryMediaId: undefined,
+    productStatus: undefined,
+    isActive: true,
     updatedAt: snapshot.updated_at,
     barcode: '',
     icon,

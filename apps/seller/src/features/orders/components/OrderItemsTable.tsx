@@ -20,8 +20,10 @@ export function OrderItemsTable({ items }: OrderItemsTableProps) {
         </Card>
       ) : (
         <Card className="overflow-hidden border border-outline-variant/60 p-0 shadow-none">
-          {/* Desktop Table (hidden on mobile, visible on md and up) */}
-          <div className="hidden overflow-x-auto md:block">
+          {/* One table, one DOM copy: a duplicated responsive layout would render every
+              SKU, price and total twice, so the numbers on screen could not be asserted
+              (or trusted) as the server's single source. */}
+          <div className="overflow-x-auto">
             <table className="w-full text-left font-body text-body-sm">
               <thead className="border-b border-outline-variant/60 bg-surface-container-low text-caption font-semibold uppercase tracking-wider text-graphite">
                 <tr>
@@ -99,67 +101,9 @@ export function OrderItemsTable({ items }: OrderItemsTableProps) {
                     </tr>
                   );
                 })}
-              </tbody>
+            </tbody>
             </table>
           </div>
-
-          {/* Mobile Card List (visible on mobile, hidden on md and up) */}
-          <div className="divide-y divide-outline-variant/40 md:hidden">
-            {items.map((item, idx) => {
-              const hasAttributes = Boolean(item.color || item.size);
-              const returned = item.returnedQuantity ?? 0;
-
-              return (
-                <article key={`m-${item.sku}-${idx}`} className="grid gap-3 p-4">
-                  <div className="flex items-start gap-3">
-                    <ProductThumbnail
-                      productId={item.productId ?? undefined}
-                      mediaId={item.primaryMediaId ?? undefined}
-                      className="size-14 shrink-0 rounded-control border border-outline-variant/40"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <h4 className="font-medium text-on-surface">{item.name}</h4>
-                      <div className="mt-1 flex items-center gap-1">
-                        <code className="font-mono text-caption text-graphite">{item.sku}</code>
-                        <CopyButton text={item.sku} label="Sao chép SKU" />
-                      </div>
-                      {hasAttributes ? (
-                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                          {item.color ? (
-                            <span className="inline-flex items-center rounded bg-surface-container-high px-1.5 py-0.5 text-[11px] font-medium text-graphite">
-                              Màu: {item.color}
-                            </span>
-                          ) : null}
-                          {item.size ? (
-                            <span className="inline-flex items-center rounded bg-surface-container-high px-1.5 py-0.5 text-[11px] font-medium text-graphite">
-                              Size: {item.size}
-                            </span>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between border-t border-outline-variant/30 pt-2 text-caption">
-                    <div className="text-graphite">
-                      <span>Đơn giá: {item.unitPriceFormatted}</span>
-                      <span className="mx-1.5">·</span>
-                      <span>SL: <strong className="text-on-surface">{item.quantity}</strong></span>
-                      {returned > 0 ? (
-                        <span className="ml-1.5 text-amber-700 dark:text-amber-400">
-                          (Đã trả {returned})
-                        </span>
-                      ) : null}
-                    </div>
-                    <strong className="font-body text-body-sm font-semibold text-on-surface">
-                      {item.lineTotalFormatted}
-                    </strong>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-
         </Card>
       )}
     </section>

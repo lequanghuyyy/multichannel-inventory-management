@@ -10,19 +10,22 @@ import { useRealtimeRefresh } from '../realtime/RealtimeProvider';
 import { ChannelWorkspaceTabs, isChannelWorkspaceTab, type ChannelWorkspaceTab } from './components/ChannelWorkspaceTabs';
 import { ChannelOverviewTab } from './components/ChannelOverviewTab';
 import { ChannelBrandIcon } from '../../components/common/ChannelBrandIcon';
-import { ChannelInventoryOperations, ChannelOrderIngestion, ChannelActivityHistory, ChannelCapabilitiesSettings } from './components/ChannelOperations';
-import { ChannelProductsWorkspace } from './components/ChannelProductsWorkspace';
+import { ChannelOrderIngestion, ChannelActivityHistory, ChannelCapabilitiesSettings } from './components/ChannelOperations';
 import { ChannelSettingsTab } from './components/ChannelSettingsTab';
 import { ShopifyCapabilityPanel } from './components/ShopifyCapabilityPanel';
+import { ShopifyIntegrationPanel } from './components/ShopifyIntegrationPanel';
 import { WooCommerceSettingsPanel } from './components/WooCommerceSettingsPanel';
 import { LazadaPanel } from './components/LazadaPanel';
 import { LazadaOrdersPanel } from './components/LazadaOrdersPanel';
+import { ChannelApiProductsTab } from './components/ChannelApiProductsTab';
+import { ChannelApiMappingLedger } from './components/ChannelApiMappingLedger';
+import { ChannelMappingLedger } from './components/ChannelMappingLedger';
 import type { SalesChannel } from './channel.types';
 import { AuthContext } from '../auth/AuthProvider';
 import type { Order as FixtureOrder } from '../orders/order.types';
 
 const PAGE_SIZE = 100;
-const tabsNeedingMappings = new Set<ChannelWorkspaceTab>(['overview']);
+const tabsNeedingMappings = new Set<ChannelWorkspaceTab>(['overview', 'products', 'inventory']);
 function readTab(): ChannelWorkspaceTab {
   const value = new URLSearchParams(window.location.search).get('tab');
   return isChannelWorkspaceTab(value) ? value : 'overview';
@@ -30,12 +33,16 @@ function readTab(): ChannelWorkspaceTab {
 
 export function ChannelDetailPage({ id, mode }: { id: string; mode: DemoMode }) {
   const auth = useContext(AuthContext);
-  const focusListingId = new URLSearchParams(window.location.search).get('listing') ?? undefined;
   const [activeTab, setActiveTab] = useState<ChannelWorkspaceTab>(readTab);
   const [channel, setChannel] = useState<Channel | null>(null);
   const [fixtureChannel, setFixtureChannel] = useState<SalesChannel | null>(null);
   const [loadedId, setLoadedId] = useState<string | null>(null);
   const [mappings, setMappings] = useState<ChannelMapping[]>([]);
+  const [mappingCursor, setMappingCursor] = useState<string | null>(null);
+  const [mappingTotal, setMappingTotal] = useState(0);
+  const [mappingLoading, setMappingLoading] = useState(false);
+  const [mappingLoadingMore, setMappingLoadingMore] = useState(false);
+  const [mappingError, setMappingError] = useState<unknown>(null);
   const [issues, setIssues] = useState<ChannelMappingIssue[]>([]);
   const [issueCount, setIssueCount] = useState(0);
   const [loadedMappingKey, setLoadedMappingKey] = useState<string | null>(null);
@@ -78,7 +85,15 @@ export function ChannelDetailPage({ id, mode }: { id: string; mode: DemoMode }) 
       setChannel(null);
       setFixtureChannel(null);
       setShopifyStatus(null);
-      setMappings([]); setIssues([]); setIssueCount(0); setLoadedMappingKey(null);
+      setMappings([]);
+      setMappingCursor(null);
+      setMappingTotal(0);
+      setMappingLoading(false);
+      setMappingLoadingMore(false);
+      setMappingError(null);
+      setIssues([]);
+      setIssueCount(0);
+      setLoadedMappingKey(null);
     }
     setChannelError(null);
 
@@ -108,22 +123,74 @@ export function ChannelDetailPage({ id, mode }: { id: string; mode: DemoMode }) 
   const currentChannel = loadedId === id ? channel : null;
   const currentFixture = loadedId === id ? fixtureChannel : null;
 
+  const loadMoreMappings = useCallback(async () => {
+    if (!currentChannel || !mappingCursor || mappingLoadingMore) return;
+    const controller = new AbortController();
+    setMappingLoadingMore(true);
+    try {
+      const page = await listChannelMappings(
+        currentChannel.id,
+        { limit: PAGE_SIZE, cursor: mappingCursor },
+        controller.signal,
+      );
+      setMappings((prev) => [...prev, ...page.items]);
+      setMappingCursor(page.nextCursor ?? null);
+      if (page.totalCount !== undefined && page.totalCount !== null) {
+        setMappingTotal(page.totalCount);
+      }
+    } catch (cause) {
+      setMappingError(cause);
+    } finally {
+      setMappingLoadingMore(false);
+    }
+  }, [currentChannel, mappingCursor, mappingLoadingMore]);
+
+  const refreshMappings = useCallback(() => {
+    if (!currentChannel) return;
+    const controller = new AbortController();
+    setMappingLoading(true);
+    setMappingError(null);
+    void listChannelMappings(currentChannel.id, { limit: PAGE_SIZE }, controller.signal)
+      .then((page) => {
+        setMappings(page.items);
+        setMappingCursor(page.nextCursor ?? null);
+        setMappingTotal(page.totalCount ?? currentChannel.mapping_count ?? page.items.length);
+        setIssues(page.issues ?? []);
+        setIssueCount(page.issueCount ?? 0);
+      })
+      .catch((cause) => {
+        setMappingError(cause);
+      })
+      .finally(() => {
+        setMappingLoading(false);
+      });
+  }, [currentChannel]);
+
   useEffect(() => {
     if (mode !== 'default' || !currentChannel || !tabsNeedingMappings.has(activeTab)) return;
     const key = `${id}:${attempt}`;
     if (loadedMappingKey === key) return;
     const controller = new AbortController();
     const epoch = requestEpoch.current;
+    setMappingLoading(true);
+    setMappingError(null);
     void listChannelMappings(id, { limit: PAGE_SIZE }, controller.signal).then((page) => {
       if (controller.signal.aborted || epoch !== requestEpoch.current) return;
       setMappings(page.items);
+      setMappingCursor(page.nextCursor ?? null);
+      setMappingTotal(page.totalCount ?? currentChannel.mapping_count ?? page.items.length);
       setIssues(page.issues ?? []);
       setIssueCount(page.issueCount ?? 0);
       setLoadedMappingKey(key);
     }).catch((cause: unknown) => {
       if (controller.signal.aborted || epoch !== requestEpoch.current) return;
-      console.warn('Channel overview mappings could not be loaded.', cause);
+      console.warn('Channel mappings could not be loaded.', cause);
+      setMappingError(cause);
       setLoadedMappingKey(key);
+    }).finally(() => {
+      if (!controller.signal.aborted && epoch === requestEpoch.current) {
+        setMappingLoading(false);
+      }
     });
     return () => controller.abort();
   }, [activeTab, attempt, currentChannel?.id, currentChannel?.mapping_count, id, loadedMappingKey, mode]);
@@ -177,22 +244,65 @@ export function ChannelDetailPage({ id, mode }: { id: string; mode: DemoMode }) 
   return <ChannelWorkspaceFrame channelName={displayChannel.name} channelIcon={<ChannelBrandIcon code={displayChannel.code} simulated={displayChannel.type === 'simulator' || displayChannel.environment === 'simulated'} />} activeTab={activeTab} onChange={selectTab} lastSync={displayChannel.last_sync}>
     <h1 className="sr-only" id="channel-detail-title">{displayChannel.name}</h1>
     <div id={`channel-workspace-panel-${activeTab}`} role="tabpanel" tabIndex={0} aria-labelledby="channel-detail-title" className="min-w-0 outline-none">
+      {fixture ? (
+        <Card className="mb-5 border border-apricot/40 p-3 text-sm text-on-surface" variant="muted" role="status">
+          Đang xem dữ liệu demo. Trạng thái này không chứng minh kênh đã kết nối.
+        </Card>
+      ) : null}
       {fixture && currentFixture ? <FixtureTab tab={activeTab} channel={currentFixture} mode={mode} /> : null}
       {!fixture && currentChannel && activeTab === 'overview' ? <ChannelOverviewTab key={`${currentChannel.id}:${attempt}`} channel={currentChannel} shopifyStatus={shopifyStatus} mappings={mappings} issues={issues} issueCount={issueCount} onNavigate={selectTab} /> : null}
       {!fixture && currentChannel && activeTab === 'products' ? currentChannel.code === 'lazada'
         ? <LazadaPanel key={`${currentChannel.id}:${attempt}`} channel={currentChannel} tab="products" canManage={canManage} onUpdated={refresh} onSettings={() => selectTab('settings')} />
-        : <ChannelProductsWorkspace key={`${currentChannel.id}:${attempt}`} channel={currentChannel} canManage={canManage} onSettings={() => selectTab('settings')} /> : null}
-      {!fixture && currentChannel && activeTab === 'inventory' ? <ChannelInventoryOperations key={`${currentChannel.id}:${attempt}`} channel={currentChannel} canManage={canManage} focusListingId={focusListingId} /> : null}
+        : <ChannelApiProductsTab
+            channel={currentChannel}
+            mappings={mappings}
+            totalCount={mappingTotal}
+            loading={mappingLoading}
+            error={mappingError}
+            loadingMore={mappingLoadingMore}
+            hasMore={Boolean(mappingCursor)}
+            onLoadMore={loadMoreMappings}
+            onRefresh={refreshMappings}
+          /> : null}
+      {!fixture && currentChannel && activeTab === 'inventory' ? (
+        mappingLoading && mappings.length === 0 ? (
+          <LoadingState label="Đang tải dữ liệu đối soát…" />
+        ) : mappingError && mappings.length === 0 ? (
+          <ErrorState error={mappingError} retry={refreshMappings} />
+        ) : mappings.length === 0 ? (
+          <EmptyState
+            title="Chưa có listing để đối soát"
+            detail="Kênh bán chưa có listing hoặc biến thể nào được cấu hình đối soát."
+          />
+        ) : (
+          <ChannelApiMappingLedger
+            mappings={mappings}
+            totalCount={mappingTotal}
+            issues={issues}
+            issueCount={issueCount}
+            shopify={currentChannel.code === 'shopify'}
+            ebay={currentChannel.code === 'ebay'}
+            woocommerce={currentChannel.code === 'woocommerce'}
+            hasMore={Boolean(mappingCursor)}
+            loadingMore={mappingLoadingMore}
+            onLoadMore={loadMoreMappings}
+          />
+        )
+      ) : null}
       {!fixture && currentChannel && activeTab === 'orders' ? currentChannel.code === 'lazada'
         ? <LazadaOrdersPanel key={`${currentChannel.id}:${attempt}`} channelId={currentChannel.id} canManage={canManage} connected={currentChannel.status === 'connected'} />
         : <ChannelOrderIngestion key={`${currentChannel.id}:${attempt}`} channel={currentChannel} canManage={canManage} /> : null}
       {!fixture && currentChannel && activeTab === 'history' ? <ChannelActivityHistory key={`${currentChannel.id}:${attempt}`} channel={currentChannel} /> : null}
       {!fixture && currentChannel && activeTab === 'settings' ? <div className="grid gap-5">
-        {currentChannel.code === 'lazada'
-          ? <LazadaPanel key={`${currentChannel.id}:${attempt}`} channel={currentChannel} tab="settings" canManage={canManage} onUpdated={refresh} />
-          : currentChannel.code === 'woocommerce'
-          ? <WooCommerceSettingsPanel key={`${currentChannel.id}:${attempt}`} channel={currentChannel} canManage={canManage} onUpdated={refresh} />
-          : <ChannelSettingsTab key={`${currentChannel.id}:${attempt}`} channel={currentChannel} canManage={canManage} status={shopifyStatus} statusLoading={shopifyStatusLoading} statusError={shopifyStatusError} onStatusChange={setShopifyStatus} onUpdated={refresh} />}
+        {currentChannel.code === 'shopify' ? (
+          <ShopifyIntegrationPanel canManage={canManage} channelId={currentChannel.id} onUpdated={refresh} />
+        ) : currentChannel.code === 'lazada' ? (
+          <LazadaPanel key={`${currentChannel.id}:${attempt}`} channel={currentChannel} tab="settings" canManage={canManage} onUpdated={refresh} />
+        ) : currentChannel.code === 'woocommerce' ? (
+          <WooCommerceSettingsPanel key={`${currentChannel.id}:${attempt}`} channel={currentChannel} canManage={canManage} onUpdated={refresh} />
+        ) : (
+          <ChannelSettingsTab key={`${currentChannel.id}:${attempt}`} channel={currentChannel} canManage={canManage} status={shopifyStatus} statusLoading={shopifyStatusLoading} statusError={shopifyStatusError} onStatusChange={setShopifyStatus} onUpdated={refresh} />
+        )}
         {currentChannel.code === 'shopify' ? <ShopifyCapabilityPanel channelId={currentChannel.id} canManage={canManage} /> : null}
         <ChannelCapabilitiesSettings channel={currentChannel} />
       </div> : null}
@@ -246,10 +356,7 @@ function FixtureTab({ tab, channel, mode }: { tab: ChannelWorkspaceTab; channel:
     </section>
     <Card className="grid gap-3 p-5"><h2 className="font-display text-lg font-bold text-on-surface">Cửa hàng</h2><div className="flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-graphite">{channel.name}</p><StatusBadge tone={channel.connectionStatus === 'connected' ? 'success' : channel.connectionStatus === 'error' ? 'danger' : 'neutral'}>{channel.connectionStatus === 'connected' ? 'Đang hoạt động' : channel.connectionStatus === 'error' ? 'Cần kiểm tra' : 'Chưa kết nối'}</StatusBadge></div></Card>
   </div>;
-  if (tab === 'products') return <div className="grid min-w-0 gap-5">
-    <header><h2 className="font-display text-xl font-bold text-on-surface">Sản phẩm</h2><p className="mt-1 text-sm text-graphite">{channel.mappingRows.length} sản phẩm trên cửa hàng</p></header>
-    {channel.mappingRows.length ? <Card className="min-w-0 overflow-hidden p-0"><div className="hidden overflow-x-auto md:block"><table className="w-full min-w-[680px] border-collapse text-left"><thead><tr className="h-12 border-b border-outline-variant/50 bg-surface-container-low text-xs font-semibold text-graphite"><th className="px-5">Sản phẩm</th><th className="px-3">SKU cửa hàng</th><th className="px-3">SKU nội bộ</th><th className="px-5">Tình trạng</th></tr></thead><tbody className="divide-y divide-surface-container">{channel.mappingRows.map((row) => <tr key={row.id} className="text-sm"><td className="px-5 py-4"><strong className="block text-on-surface">{row.externalProduct}</strong><span className="mt-1 block text-xs text-graphite">{row.externalVariant}</span></td><td className="px-3 py-4 font-mono text-xs text-on-surface">{row.channelSku}</td><td className="px-3 py-4 font-mono text-xs text-on-surface">{row.canonicalSku || 'Chưa liên kết'}</td><td className="px-5 py-4"><StatusBadge tone={row.status === 'mapped' ? 'success' : 'warning'}>{row.status === 'mapped' ? 'Đang bán' : 'Cần kiểm tra'}</StatusBadge></td></tr>)}</tbody></table></div><div className="grid gap-2 p-3 md:hidden">{channel.mappingRows.map((row) => <article key={row.id} className="grid gap-2 rounded-control border border-outline-variant/50 p-4"><strong className="text-sm text-on-surface">{row.externalProduct}</strong><span className="text-xs text-graphite">{row.externalVariant}</span><span className="font-mono text-xs text-on-surface">{row.channelSku}</span><StatusBadge tone={row.status === 'mapped' ? 'success' : 'warning'}>{row.status === 'mapped' ? 'Đang bán' : 'Cần kiểm tra'}</StatusBadge></article>)}</div></Card> : <EmptyState title="Chưa có sản phẩm" detail="Sản phẩm của cửa hàng sẽ hiển thị tại đây." />}
-  </div>;
+  if (tab === 'products') return <ChannelMappingLedger channel={channel} />;
   if (tab === 'inventory') return <div className="grid gap-5"><header><h2 className="font-display text-xl font-bold text-on-surface">Tồn kho</h2></header><EmptyState title="Chưa có dữ liệu tồn kho" detail="Số lượng sản phẩm sẽ hiển thị khi cửa hàng được kết nối." /></div>;
   if (tab === 'orders') return <FixtureOrders channel={channel} mode={mode} />;
   if (tab === 'history') return <div className="grid gap-5"><header><h2 className="font-display text-xl font-bold text-on-surface">Lịch sử hoạt động</h2></header><EmptyState title="Chưa có hoạt động" detail="Các thay đổi của cửa hàng sẽ hiển thị tại đây." /></div>;

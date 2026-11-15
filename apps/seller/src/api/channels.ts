@@ -1,7 +1,7 @@
 import type { components } from './generated/openapi';
 import { createApiClient } from './client';
 import { ApiRequestError, parseApiError, responseApiError } from '../core/api-error';
-import type { Page } from './list';
+import { pageOf, type Page } from './list';
 
 type ServerChannel = components['schemas']['ChannelResponse'];
 type ServerListing = components['schemas']['ChannelListingResponse'];
@@ -204,11 +204,15 @@ export interface ChannelMappingQuery extends ChannelQuery {
   issue_cursor?: string;
 }
 
-function requireId(value: number | undefined, entity: string): string {
-  if (value === undefined || !Number.isSafeInteger(value)) {
+function requireId(value: unknown, entity: string): string {
+  if (value === undefined || value === null) {
     throw new Error(`Phản hồi ${entity} không có mã hợp lệ.`);
   }
-  return String(value);
+  const str = String(value).trim();
+  if (!str) {
+    throw new Error(`Phản hồi ${entity} không có mã hợp lệ.`);
+  }
+  return str;
 }
 
 function channelType(code: string, environment: string): string {
@@ -318,48 +322,71 @@ function summarizeMappings(items: readonly ChannelMapping[]): ChannelProductSumm
   };
 }
 
-/** `GET /channels` returns a plain array and takes no parameters. */
-export async function listChannels(_query: ChannelQuery = {}, signal?: AbortSignal): Promise<Page<Channel>> {
+/** `GET /channels` supports both bare arrays from Spring Boot and legacy envelope shapes. */
+export async function listChannels(query: ChannelQuery = {}, signal?: AbortSignal): Promise<Page<Channel>> {
   const client = createApiClient();
-  const { data, response } = await client.GET('/api/v1/channels', { signal, cache: 'no-store' });
+  const { data, response } = await client.GET('/api/v1/channels', {
+    params: { query: query as any },
+    signal,
+    cache: 'no-store',
+  });
   if (!response.ok) await responseApiError(response);
-  if (!Array.isArray(data)) throw new Error('Dữ liệu danh sách kênh bán nhận về không hợp lệ.');
-  const items = data.map(toChannel);
-  return { items, nextCursor: null, totalCount: items.length };
+  if (!data) throw new Error('Dữ liệu danh sách kênh bán nhận về không hợp lệ.');
+  if (Array.isArray(data)) {
+    const items = data.map(toChannel);
+    return { items, nextCursor: null, totalCount: items.length };
+  }
+  return pageOf<Channel>(data as unknown as Record<string, unknown>, 'channels');
 }
 
 export async function getChannel(channelId: string, signal?: AbortSignal): Promise<Channel> {
   const client = createApiClient();
   const { data, response } = await client.GET('/api/v1/channels/{channelId}', {
-    params: { path: { channelId: Number(channelId) } }, signal, cache: 'no-store',
+    params: { path: { channelId: channelId as any } }, signal, cache: 'no-store',
   });
   if (!response.ok) await responseApiError(response);
   if (!data) throw new Error('Dữ liệu chi tiết kênh bán nhận về không hợp lệ.');
-  return toChannel(data);
+  if (typeof (data as any).id === 'number') {
+    return toChannel(data);
+  }
+  return data as unknown as Channel;
 }
 
-/** `GET /channels/{channelId}/mappings` returns a plain array; filter parameters are not served. */
+/** `GET /channels/{channelId}/mappings` supports both bare arrays and legacy envelope shapes. */
 export async function listChannelMappings(
   channelId: string,
-  _query: ChannelMappingQuery = {},
+  query: ChannelMappingQuery = {},
   signal?: AbortSignal,
 ): Promise<ChannelMappingPage> {
   const client = createApiClient();
   const { data, response } = await client.GET('/api/v1/channels/{channelId}/mappings', {
-    params: { path: { channelId: Number(channelId) } }, signal, cache: 'no-store',
+    params: { path: { channelId: channelId as any }, query: query as any }, signal, cache: 'no-store',
   });
   if (!response.ok) await responseApiError(response);
-  if (!Array.isArray(data)) throw new Error('Dữ liệu ánh xạ SKU nhận về không hợp lệ.');
-  const items = data.map((listing) => toMapping(listing, channelId));
+  if (!data) throw new Error('Dữ liệu ánh xạ SKU nhận về không hợp lệ.');
+  if (Array.isArray(data)) {
+    const items = data.map((listing) => toMapping(listing, channelId));
+    return {
+      items,
+      nextCursor: null,
+      totalCount: items.length,
+      summary: summarizeMappings(items),
+      // Spring Boot returns every listing on the channel; it has no separate issue feed.
+      issues: [],
+      issueCount: 0,
+      nextIssueCursor: null,
+    };
+  }
+  const record = data as unknown as Record<string, unknown>;
+  const page = pageOf<ChannelMapping>(record, 'mappings');
   return {
-    items,
-    nextCursor: null,
-    totalCount: items.length,
-    summary: summarizeMappings(items),
-    // Spring Boot returns every listing on the channel; it has no separate issue feed.
-    issues: [],
-    issueCount: 0,
-    nextIssueCursor: null,
+    ...page,
+    summary: record.summary && typeof record.summary === 'object'
+      ? record.summary as ChannelProductSummary
+      : { product_count: 0, variant_count: page.totalCount ?? 0, missing_balance_count: 0, total_on_hand: null, total_reserved: null, total_available_to_sell: null, total_received: 0, pending_inbound: 0, awaiting_shipment: 0, in_transit: 0, pending_return: 0 },
+    issues: Array.isArray(record.issues) ? record.issues as ChannelMappingIssue[] : [],
+    issueCount: typeof record.issue_count === 'number' ? record.issue_count : 0,
+    nextIssueCursor: typeof record.next_issue_cursor === 'string' ? record.next_issue_cursor : null,
   };
 }
 

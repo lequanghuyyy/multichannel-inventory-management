@@ -1,7 +1,7 @@
 import type { components, operations } from './generated/openapi';
 import { apiFetch, createApiClient } from './client';
 import { ApiRequestError, parseApiError, responseApiError } from '../core/api-error';
-import type { Page } from './list';
+import { pageOf, type Page } from './list';
 
 export type Order = components['schemas']['Order'];
 export type OrderItem = components['schemas']['OrderItem'];
@@ -67,11 +67,15 @@ type ServerOrder = components['schemas']['OrderResponse'];
 type ServerOrderItem = NonNullable<ServerOrder['items']>[number];
 type ServerOrderHistory = components['schemas']['OrderHistoryResponse'];
 
-function requireId(value: number | undefined, entity: string): string {
-  if (value === undefined || !Number.isSafeInteger(value)) {
+function requireId(value: unknown, entity: string): string {
+  if (value === undefined || value === null) {
     throw new Error(`Phản hồi ${entity} không có mã hợp lệ.`);
   }
-  return String(value);
+  const str = String(value).trim();
+  if (!str) {
+    throw new Error(`Phản hồi ${entity} không có mã hợp lệ.`);
+  }
+  return str;
 }
 
 function toOrderStatus(value: string | undefined): Order['status'] {
@@ -357,32 +361,47 @@ function computeMetrics(orders: readonly Order[]): OrderMetrics {
 }
 
 /**
- * `GET /orders` returns a plain array with no query parameters, so the ledger filters and the
- * metrics are computed here. The cursor is always null: the server has no cursor to follow.
+ * `GET /orders` supports both bare arrays from Spring Boot and legacy envelope shapes.
  */
 export async function listOrders(query: OrderQuery = {}, signal?: AbortSignal): Promise<Page<Order> & { metrics: OrderMetrics }> {
   const client = createApiClient();
-  const { data, response } = await client.GET('/api/v1/orders', { signal, cache: 'no-store' });
+  const { data, response } = await client.GET('/api/v1/orders', {
+    params: { query: query as any },
+    signal,
+    cache: 'no-store',
+  });
 
   if (!response.ok) await responseApiError(response);
-  if (!Array.isArray(data)) throw new Error('Dữ liệu danh sách đơn hàng nhận về không hợp lệ.');
-  const items = data.map(toOrder).filter((order) => matchesQuery(order, query));
-  const statusCounts: Record<string, number> = {};
-  for (const order of items) statusCounts[order.status] = (statusCounts[order.status] ?? 0) + 1;
-  return { items, nextCursor: null, totalCount: items.length, statusCounts, metrics: computeMetrics(items) };
+  if (!data) throw new Error('Dữ liệu danh sách đơn hàng nhận về không hợp lệ.');
+
+  if (Array.isArray(data)) {
+    const items = data.map(toOrder).filter((order) => matchesQuery(order, query));
+    const statusCounts: Record<string, number> = {};
+    for (const order of items) statusCounts[order.status] = (statusCounts[order.status] ?? 0) + 1;
+    return { items, nextCursor: null, totalCount: items.length, statusCounts, metrics: computeMetrics(items) };
+  }
+
+  const page = pageOf<Order>(data as unknown as Record<string, unknown>, 'orders');
+  return {
+    ...page,
+    metrics: (data as any).metrics ?? computeMetrics(page.items),
+  };
 }
 
 export async function getOrder(orderId: string, signal?: AbortSignal): Promise<Order> {
   const client = createApiClient();
   const { data, response } = await client.GET('/api/v1/orders/{id}', {
-    params: { path: { id: Number(orderId) } },
+    params: { path: { id: orderId as any } },
     signal,
     cache: 'no-store',
   });
 
   if (!response.ok) await responseApiError(response);
   if (!data) throw new Error('Dữ liệu chi tiết đơn hàng nhận về không hợp lệ.');
-  return toOrder(data);
+  if (typeof (data as any).id === 'number' || 'order_number' in (data as any)) {
+    return toOrder(data);
+  }
+  return data as unknown as Order;
 }
 
 export async function getOrderHistory(orderId: string, signal?: AbortSignal): Promise<OrderHistory> {
@@ -607,14 +626,14 @@ export async function createOrder(input: CreateOrderInput, idempotencyKey: strin
   const client = createApiClient();
   const { data, response } = await client.POST('/api/v1/orders', {
     params: { header: { 'Idempotency-Key': idempotencyKey } },
-    body: {
-      source: 'POS',
-      items: input.lines.map((line) => ({ sku: line.sku, quantity: line.quantity })),
-    },
+    body: input as any,
     signal,
   });
 
   if (!response.ok) await responseApiError(response);
   if (!data) throw new Error('Dữ liệu tạo đơn hàng nhận về không hợp lệ.');
-  return toOrder(data);
+  if (typeof (data as any).id === 'number' || 'order_number' in (data as any)) {
+    return toOrder(data);
+  }
+  return data as unknown as Order;
 }

@@ -17,14 +17,14 @@ export function ProductChannelNotice({ kind, children }: { kind: MessageKind; ch
   </div>;
 }
 
-export function ProductChannelProgressNotice({ channelName, detail, refreshing, onRefresh }: {
-  channelName: string; detail: string; refreshing?: boolean; onRefresh?: () => void;
+export function ProductChannelProgressNotice({ channelName, title, detail, refreshing, onRefresh }: {
+  channelName: string; title?: string; detail: string; refreshing?: boolean; onRefresh?: () => void;
 }) {
   return <ProductChannelNotice kind="info">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <span className="flex min-w-0 items-start gap-2">
         <span aria-hidden="true" className="material-symbols-outlined motion-safe:animate-spin">progress_activity</span>
-        <span><strong className="block">Đang xử lý yêu cầu trên {channelName}</strong><span className="mt-0.5 block">{detail} Trạng thái tự cập nhật; không cần gửi lại.</span></span>
+        <span><strong className="block">{title ?? `Đang xử lý yêu cầu trên ${channelName}`}</strong><span className="mt-0.5 block">{detail} Trạng thái tự cập nhật; không cần gửi lại.</span></span>
       </span>
       {onRefresh ? <Button size="sm" variant="secondary" disabled={refreshing} loading={refreshing} onClick={onRefresh}>Làm mới tiến trình</Button> : null}
     </div>

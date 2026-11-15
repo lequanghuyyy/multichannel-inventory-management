@@ -50,9 +50,7 @@ export function ProductsPage({ mode, canManageCatalog = false }: { mode: DemoMod
       : system.error ? 'Không xác minh được khả năng ghi catalog.'
         : 'Backend không mở catalog write trong môi trường này.';
 
-  // The server list endpoint takes no query parameters. These filters are applied inside
-  // `listProducts` on the full array it returns, so the request key stays stable per filter set.
-  const apiQuery = useMemo<ProductQuery>(() => ({
+  const apiQuery = useMemo<Omit<ProductQuery, 'cursor' | 'limit'>>(() => ({
     ...(deferredQuery ? { q: deferredQuery } : {}),
     ...(filters.status !== 'all' && filters.status !== 'under_review' && filters.status !== 'out_of_stock'
       ? { status: filters.status as ProductStatus }
@@ -62,8 +60,8 @@ export function ProductsPage({ mode, canManageCatalog = false }: { mode: DemoMod
   const requestKey = JSON.stringify(apiQuery);
   const loadFixture = useMemo(() => getProducts, []);
   const apiPage = useApiPage<ProductApiRow, ProductCatalogItem>(
-    async (_cursor, signal) => {
-      const response = await listProducts(apiQuery, signal);
+    async (cursor, signal) => {
+      const response = await listProducts({ limit: 50, ...apiQuery, ...(cursor ? { cursor } : {}) }, signal);
       return { items: response.items.map(toProductApiRow), nextCursor: response.nextCursor };
     },
     loadFixture,

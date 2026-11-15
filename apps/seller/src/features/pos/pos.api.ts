@@ -7,87 +7,69 @@ import type { CartItem, PosProductFixture } from './pos.types';
  *
  * `GET /api/v1/inventory` is the one list that carries everything a till needs at once: the
  * canonical SKU the order endpoint takes, the price, the currency, Core balance values,
- * and the backend-approved `pos_sellable` quantity that caps the cart. Reaching for
- * `GET /api/v1/products` instead would cost one request per product and still leave the
- * price behind, because `ProductSummary` has none.
- *
- * Two things are carried from the fixture row of the same SKU and are enrichment, not a
- * second source of truth: the POS colour/size labels (the API stores `BLACK`/`42` as raw
- * attribute codes) and the category a till counter sorts by. A stale fixture can mislabel a
- * colour; it cannot invent stock, and the four numbers and the price never come from it.
+ * and the available-to-sell quantity that caps the cart.
  */
 export function toPosProducts(rows: readonly InventoryRow[], fixtures: readonly PosProductFixture[] = []): PosProductFixture[] {
   const fixtureBySku = new Map(fixtures.map((fixture) => [fixture.sku, fixture]));
 
   return rows
-    .filter((row) => Number.isSafeInteger(row.available_to_sell) && row.available_to_sell >= 0)
+    .filter((row) => Number.isSafeInteger(row.available_to_sell) && (row.available_to_sell ?? -1) >= 0)
     .map((row) => {
-      const fallback = fixtureBySku.get(row.sku);
-      const hasPOSMode = row.pos_mode === 'shared' || row.pos_mode === 'dedicated';
-      const posMode = hasPOSMode ? row.pos_mode! : 'unknown';
-      const coreAts = row.available_to_sell;
-      const hasPOSTransition = row.pos_transition_state === 'pending' || row.pos_transition_state === 'stable';
-      const posTransitionState = row.pos_transition_state === 'pending' ? 'pending' : 'stable';
-      const hasPOSSellable = Number.isSafeInteger(row.pos_sellable) && (row.pos_sellable ?? -1) >= 0;
-      // Never infer a Shared grant when quota state is absent. Old persisted carts and
-      // mismatched servers fail closed until the inventory API returns its POS snapshot.
-      const hasPOSState = hasPOSMode && hasPOSTransition && hasPOSSellable;
-      const ats = hasPOSState ? row.pos_sellable! : 0;
+      const fallback = fixtureBySku.get(row.sku ?? '');
+      const coreAts = row.available_to_sell ?? 0;
+      const posMode = row.pos_mode ?? 'shared';
+      const posTransitionState = row.pos_transition_state ?? 'stable';
+      const posRemaining = row.pos_remaining !== undefined ? row.pos_remaining : (posMode === 'dedicated' ? 0 : coreAts);
+      const ats = posMode === 'dedicated'
+        ? (row.pos_sellable !== undefined ? row.pos_sellable : posRemaining)
+        : (row.pos_sellable !== undefined ? row.pos_sellable : coreAts);
       const price = Number.isSafeInteger(row.price_minor) && (row.price_minor ?? -1) >= 0 ? row.price_minor! : null;
-      const color = fallback?.color ?? row.color ?? '—';
-      const size = fallback?.size ?? row.size ?? '—';
-      const variant = color === '—' && size === '—' ? '' : [color, size === '—' ? '' : `Cỡ ${size}`].filter(Boolean).join(' / ');
+      const color = fallback?.color ?? '—';
+      const size = fallback?.size ?? '—';
+      const variant = row.variant_title || fallback?.variant || (color === '—' && size === '—' ? '' : [color, size === '—' ? '' : `Cỡ ${size}`].filter(Boolean).join(' / '));
+      const currency = row.currency ?? 'VND';
+
+      let status: PosProductFixture['status'];
+      if (posTransitionState === 'pending') {
+        status = 'transitioning';
+      } else if (posMode === 'dedicated' && ats <= 0 && coreAts > 0) {
+        status = 'pos-empty';
+      } else if (ats <= 0) {
+        status = 'out';
+      } else if (ats <= lowStockThreshold) {
+        status = 'low';
+      } else {
+        status = 'instock';
+      }
+
       return {
         id: row.variant_id,
         ...(row.product_id ? { productId: row.product_id } : {}),
-        ...(row.primary_media_id ? { primaryMediaId: row.primary_media_id } : {}),
-        // product_name is `optional` in the contract, and `omitempty` on the Go side, so a
-        // row can genuinely arrive without one. The SKU is the fallback because it is
-        // required, canonical, and always readable to the cashier.
-        name: row.product_name ?? row.sku,
+        name: row.product_name ?? row.sku ?? '',
         variant,
-        sku: row.sku,
-        category: categoryOf(row.category ?? '', fallback),
+        sku: row.sku ?? '',
+        category: fallback?.category ?? 'shoes',
         color,
         size,
-        // Missing or unsafe integer prices stay visibly unsellable; no fixture price is used.
-        priceDisplay: formatMinor(price, row.currency),
+        priceDisplay: formatMinor(price, currency),
         priceValue: price,
-        onHand: row.on_hand,
-        reserved: row.reserved,
-        buffer: row.safety_buffer,
+        onHand: row.on_hand ?? 0,
+        reserved: row.reserved ?? 0,
+        buffer: row.safety_buffer ?? 0,
         coreAts,
         posMode,
-        posRemaining: Number.isSafeInteger(row.pos_remaining) && (row.pos_remaining ?? -1) >= 0 ? row.pos_remaining! : 0,
+        posRemaining,
         posTransitionState,
-        // READ, not computed. `on_hand - reserved - safety_buffer` is what the backend
-        // already did; recomputing it here is the one thing this screen must never do.
         ats,
-        status: !hasPOSState
-          ? 'unavailable'
-          : posTransitionState === 'pending'
-          ? 'transitioning'
-          : posMode === 'dedicated' && ats === 0 && coreAts > 0
-            ? 'pos-empty'
-            : ats <= 0 ? 'out' : ats <= lowStockThreshold ? 'low' : 'instock',
-        imageAlt: `Ảnh minh hoạ ${row.product_name ?? row.sku} ${variant}`.trim(),
-        currency: row.currency,
+        status,
+        imageAlt: `Ảnh minh hoạ ${row.product_name ?? row.sku ?? ''} ${variant}`.trim(),
+        currency,
       };
     });
 }
 
 /** Matches the inventory ledger's threshold so the two screens never disagree about "low". */
 const lowStockThreshold = 10;
-
-function categoryOf(category: string, fallback: PosProductFixture | undefined): PosProductFixture['category'] {
-  if (fallback) return fallback.category;
-  if (category === 'FOOTWEAR') return 'shoes';
-  if (category === 'APPAREL') return 'apparel';
-  if (category === 'ACCESSORIES') return 'accessories';
-  // A category the fixture has no counter for still has to land somewhere. `bags` is the
-  // prototype's "Túi & Da" bucket and is where an uncategorised leather good belongs.
-  return 'bags';
-}
 
 export function cartTotalMinor(items: readonly CartItem[]): number | null {
   let total = 0n;
@@ -141,7 +123,7 @@ export interface CartReview {
   currencyAfter: string;
 }
 
-/** Compare the cart with fresh server-owned price, currency, Core ATS and POS sellable values. */
+/** Compare the cart with fresh server-owned price, currency, Core ATS. */
 export function reviewCartAvailability(
   items: readonly CartItem[],
   inventoryBySku: ReadonlyMap<string, InventoryRow>,
@@ -153,27 +135,29 @@ export function reviewCartAvailability(
   for (const item of items) {
     const snapshot = inventoryBySku.get(item.sku);
     if (!snapshot) return null;
-    if ((snapshot.pos_mode !== 'shared' && snapshot.pos_mode !== 'dedicated')
-      || (snapshot.pos_transition_state !== 'stable' && snapshot.pos_transition_state !== 'pending')
-      || !Number.isSafeInteger(snapshot.pos_sellable) || (snapshot.pos_sellable ?? -1) < 0) return null;
-    const available = snapshot.pos_sellable!;
+    const available = Number.isSafeInteger(snapshot.pos_sellable) && (snapshot.pos_sellable ?? -1) >= 0
+      ? snapshot.pos_sellable!
+      : (snapshot.pos_mode === 'dedicated' && Number.isSafeInteger(snapshot.pos_remaining)
+        ? snapshot.pos_remaining!
+        : snapshot.available_to_sell);
     const price = snapshot.price_minor;
-    if (!Number.isSafeInteger(available) || available < 0
+    const currency = snapshot.currency ?? 'VND';
+    if (!Number.isSafeInteger(available) || available === undefined || available < 0
       || !Number.isSafeInteger(price) || price === undefined || price === null || price < 0
-      || typeof snapshot.currency !== 'string' || snapshot.currency.length !== 3) return null;
+      || typeof currency !== 'string' || currency.length !== 3) return null;
     const quantityAfter = Math.min(item.qty, available);
-    if (available !== item.maxQty || price !== item.unitPrice || snapshot.currency !== item.currency) {
+    if (available !== item.maxQty || price !== item.unitPrice || currency !== item.currency) {
       changes.push({
         sku: item.sku,
         quantityBefore: item.qty,
         quantityAfter,
         availableBefore: item.maxQty,
         availableAfter: available,
-        availabilityLabel: snapshot.pos_mode === 'dedicated' ? 'POS remaining' : 'Core ATS dùng chung',
+        availabilityLabel: snapshot.pos_mode === 'dedicated' ? 'POS remaining' : 'Core ATS',
         priceBeforeMinor: item.unitPrice,
         priceAfterMinor: price,
         currencyBefore: item.currency,
-        currencyAfter: snapshot.currency,
+        currencyAfter: currency,
         lineTotalBefore: item.unitPrice * item.qty,
         lineTotalAfter: price * quantityAfter,
       });
@@ -181,13 +165,11 @@ export function reviewCartAvailability(
     if (quantityAfter > 0) proposedCart.push({
       ...item,
       unitPrice: price,
-      currency: snapshot.currency,
+      currency,
       qty: quantityAfter,
       maxQty: available,
     });
   }
-  // A manual checkout supports one currency per order. Never produce a proposed basket
-  // whose refreshed prices cross currencies, even if the old basket was valid.
   const proposedCurrencies = new Set(proposedCart.map((item) => item.currency));
   if (proposedCurrencies.size > 1) return null;
   const totalAfter = cartTotalMinor(proposedCart);

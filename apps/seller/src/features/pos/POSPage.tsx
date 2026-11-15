@@ -56,6 +56,7 @@ function makePaymentInstruction(
 }
 
 export function POSPage({ mode, userId, canDiscount = false, canManageAllocation = false }: { mode: DemoMode; userId: string; canDiscount?: boolean; canManageAllocation?: boolean }) {
+  const effectiveCanDiscount = mode === 'default' ? false : canDiscount;
   const [search, setSearch] = useState('');
   const [serverSearch, setServerSearch] = useState('');
   useEffect(() => {
@@ -137,7 +138,7 @@ export function POSPage({ mode, userId, canDiscount = false, canManageAllocation
   const currency = cartCurrencies.size === 1 ? [...cartCurrencies][0]! : '';
   const subtotalMinor = cartTotalMinor(cart);
   const parsedDiscount = discountInput.trim() === '' ? 0 : (currency ? parseMoneyInput(discountInput, currency) : null);
-  const discountMinor = !canDiscount ? 0 : parsedDiscount !== null && subtotalMinor !== null && parsedDiscount <= subtotalMinor ? parsedDiscount : null;
+  const discountMinor = !effectiveCanDiscount ? 0 : parsedDiscount !== null && subtotalMinor !== null && parsedDiscount <= subtotalMinor ? parsedDiscount : null;
   const discountReady = discountMinor !== null && (discountMinor === 0 || discountReason.trim().length > 0);
   const totalMinor = subtotalMinor === null || discountMinor === null ? null : subtotalMinor - discountMinor;
   const receivedMinor = paymentMethod === 'cash' && currency ? parseMoneyInput(cashReceived, currency) : null;
@@ -404,7 +405,7 @@ export function POSPage({ mode, userId, canDiscount = false, canManageAllocation
                 discountMinor={discountMinor}
                 discountInput={discountInput}
                 discountReason={discountReason}
-                canDiscount={canDiscount}
+                canDiscount={effectiveCanDiscount}
                 onDiscountInputChange={(amount) => { setDiscountInput(amount); setCashReceived(''); setExternalVerified(false); setCartError(null); }}
                 onDiscountReasonChange={(reason) => { setDiscountReason(reason); setCartError(null); }}
                 submitting={attempt.submitting}

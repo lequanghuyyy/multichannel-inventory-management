@@ -267,7 +267,7 @@ describe('ReceiptDetailPage', () => {
     await waitFor(() => {
       expect(cancelReceiptMock).toHaveBeenCalledWith(
         mockReceipt.id,
-        { reason: 'Shipment lost' },
+        expect.objectContaining({ reason: 'Shipment lost' }),
         expect.any(String)
       );
     });

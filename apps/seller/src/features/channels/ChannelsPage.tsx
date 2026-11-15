@@ -181,6 +181,29 @@ export function ChannelsPage({ mode }: { mode: DemoMode }) {
     {woocommerceStatusError && mode === 'default' ? <p role="status" className="text-caption text-graphite">Chưa đọc được trạng thái WooCommerce: {woocommerceStatusError}</p> : null}
     {woocommerceConnectError ? <p role="alert" className="rounded-control border border-error/40 bg-error/5 p-3 text-sm text-error">{woocommerceConnectError}</p> : null}
     {isFixture ? <Card className="border border-apricot/40 p-3 text-sm text-on-surface" variant="muted" role="status">Đang xem dữ liệu demo. Trạng thái này không chứng minh Shopify đã kết nối.</Card> : null}
+    {isFixture && !page.loading && !page.fixtureError && fixtureChannels.length > 0 ? (
+      <section aria-label="Chỉ số kênh bán" className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <Card className="p-4 sm:p-5">
+          <span className="text-sm text-graphite">Tổng số kênh</span>
+          <strong className="mt-2 block font-display text-2xl font-bold text-on-surface">
+            {fixtureChannels.length}
+          </strong>
+          <p className="mt-1 text-xs text-graphite">Kết nối và quản lý các nền tảng bán hàng của cửa hàng.</p>
+        </Card>
+        <Card className="p-4 sm:p-5">
+          <span className="text-sm text-graphite">Kết nối hợp lệ</span>
+          <strong className="mt-2 block font-display text-2xl font-bold text-success">
+            {fixtureChannels.filter((c) => c.connectionStatus === 'connected').length}
+          </strong>
+        </Card>
+        <Card className="p-4 sm:p-5">
+          <span className="text-sm text-graphite">Kênh cần xử lý</span>
+          <strong className="mt-2 block font-display text-2xl font-bold text-error">
+            {fixtureChannels.filter((c) => c.connectionStatus === 'error' || c.connectionStatus === 'pending_authorization').length}
+          </strong>
+        </Card>
+      </section>
+    ) : null}
     <ChannelFiltersPanel filters={filters} onChange={setFilters} />
     <div className="flex flex-wrap items-center justify-between gap-3">
       <p className="font-body text-body-sm text-graphite"><strong className="text-on-surface">{shown.length}</strong> {isApi && (page.hasMore || page.loadingMore) ? 'kênh đã tải phù hợp' : 'kênh phù hợp'}</p>

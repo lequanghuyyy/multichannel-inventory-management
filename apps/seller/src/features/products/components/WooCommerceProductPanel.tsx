@@ -231,6 +231,8 @@ export function WooCommerceProductPanel({ product, canWrite, wizardMode = false,
   const inventoryState = state?.publication_state === 'published' && inventoryActivation !== 'active' ? 'conflict' : state?.inventory_sync_state ?? 'not_synced';
   const showInventorySync = !wizardMode && Boolean(channelId);
 
+  const activeErrorCode = state?.last_error_code ?? latest?.safe_error_code;
+
   return <Card className="grid gap-4 p-5" aria-label="Thông tin sản phẩm WooCommerce">
     <header className="flex flex-wrap items-center justify-between gap-3 border-b border-outline-variant/50 pb-4">
       <div className="flex min-w-0 items-center gap-3">
@@ -245,7 +247,7 @@ export function WooCommerceProductPanel({ product, canWrite, wizardMode = false,
 
     {error ? <ProductChannelNotice kind="error">{error}</ProductChannelNotice> : null}
     {notice ? <ProductChannelNotice kind="success">{notice}</ProductChannelNotice> : null}
-    {state?.last_error_code ? <ProductChannelNotice kind="error"><div className="flex flex-wrap items-center justify-between gap-3 text-caption"><div className="grid gap-1"><strong>Lần gửi gần nhất chưa hoàn tất.</strong><span>{wooJobError(state.last_error_code, priceReady)}</span>{state.mapping_state === 'conflict' ? <span>Các SKU của sản phẩm: {product.variants.map((variant) => variant.sku).join(', ')}</span> : null}<code className="break-all font-mono">Mã lỗi: {state.last_error_code}</code></div>{!wizardMode ? <Button size="sm" variant="secondary" onClick={() => setHistoryOpen(true)}>Xem lần xử lý</Button> : null}</div></ProductChannelNotice> : null}
+    {activeErrorCode ? <ProductChannelNotice kind="error"><div className="flex flex-wrap items-center justify-between gap-3 text-caption"><div className="grid gap-1"><strong>Lần gửi gần nhất chưa hoàn tất.</strong><span>{wooJobError(activeErrorCode, priceReady)}</span>{state?.mapping_state === 'conflict' ? <span>Các SKU của sản phẩm: {product.variants.map((variant) => variant.sku).join(', ')}</span> : null}<code className="break-all font-mono">Mã lỗi: {activeErrorCode}</code></div>{!wizardMode ? <Button size="sm" variant="secondary" onClick={() => setHistoryOpen(true)}>Xem lần xử lý</Button> : null}</div></ProductChannelNotice> : null}
 
     {state ? <>
       <ProductChannelStatusGrid items={[
@@ -279,7 +281,7 @@ export function WooCommerceProductPanel({ product, canWrite, wizardMode = false,
       {showInventorySync && channelId ? <ProductInventorySync key={`${product.id}:${state.publication_state}:${state.inventory_activation_state}:${inventoryJob?.state ?? ''}`} channelId={channelId} productId={product.id} channelName="WooCommerce" requireListedForActions canWrite={canWrite && state.inventory_write_enabled && !loading && !busy && !inProgress} /> : null}
     </> : loading ? <p role="status" className="text-sm text-graphite">Đang tải trạng thái WooCommerce…</p> : null}
 
-    {inProgress && latest ? <ProductChannelProgressNotice channelName="WooCommerce" detail={latest.operation === 'publish' ? 'Đang mở bán và xác minh quản lý tồn kho.' : `${wooOperationLabel(latest.operation)} đang được đồng bộ.`} /> : null}
+    {inProgress && latest ? <ProductChannelProgressNotice channelName="WooCommerce" title={wooStateLabel(latest.state)} detail={latest.operation === 'publish' ? 'Đang mở bán và xác minh quản lý tồn kho.' : `${wooOperationLabel(latest.operation)} đang được đồng bộ.`} /> : null}
 
     {!wizardMode ? <footer className="flex justify-end border-t border-outline-variant/50 pt-3">
       <Button size="sm" variant="ghost" aria-expanded={historyOpen} aria-controls={`woo-product-history-${product.id}`} disabled={busy} onClick={() => setHistoryOpen((open) => !open)}>{historyOpen ? 'Ẩn lịch sử' : 'Xem lịch sử'}</Button>

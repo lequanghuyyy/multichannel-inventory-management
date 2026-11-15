@@ -1,7 +1,6 @@
 import { Card } from '../../../components/ui/Card';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { CopyButton } from './CopyButton';
-import { OrderApiHistory } from './OrderApiHistory';
 import { OrderOperationalRecords } from './OrderOperationalRecords';
 import { formatMinor } from '../../../lib/money';
 import { formatOrderTime } from '../order.utils';
@@ -24,11 +23,8 @@ export function OrderAuditTab({ order }: { order: OrderApiRow }) {
 
   return (
     <div className="grid gap-6">
-      {/* 1. Lịch sử thay đổi trạng thái Core */}
-      <section aria-labelledby="status-history-heading">
-        <OrderApiHistory orderId={order.id} />
-      </section>
-
+      {/* 1. Lịch sử thay đổi trạng thái Core được trang chi tiết render cố định dưới các tab,
+          nên tab này chỉ giữ đối soát vận hành và bằng chứng. */}
       <OrderOperationalRecords orderId={order.id} />
 
       {/* 2. Nhật ký bằng chứng thanh toán */}

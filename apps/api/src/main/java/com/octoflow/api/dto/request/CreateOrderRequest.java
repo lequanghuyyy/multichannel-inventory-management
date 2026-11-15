@@ -1,6 +1,7 @@
 package com.octoflow.api.dto.request;
 
 import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.Max;
@@ -19,6 +20,7 @@ import java.util.List;
  * only for backwards compatibility and any value other than POS is rejected. Marketplace orders
  * enter through the internal ChannelOrderCommand boundary, never through this DTO.
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public record CreateOrderRequest(
         @JsonProperty("source")
         @JsonAlias({"channel_code", "channelCode", "source"})

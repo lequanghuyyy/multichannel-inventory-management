@@ -17,7 +17,6 @@ import {
 export interface OrderDetailHeaderProps {
   order: OrderApiRow;
   onNextAction: (target: ApiOrderTransitionTarget) => void;
-  onOpenCancelModal: () => void;
   onPrintSale: () => void;
   onPrintPacking: () => void;
   canPrintPacking: boolean;
@@ -45,7 +44,6 @@ function getNextActionTarget(status: OrderApiRow['status']): {
 export function OrderDetailHeader({
   order,
   onNextAction,
-  onOpenCancelModal,
   onPrintSale,
   onPrintPacking,
   canPrintPacking,
@@ -84,11 +82,6 @@ export function OrderDetailHeader({
     : ['failed', 'failure'].includes(externalPaymentStatus)
     ? { label: 'Thanh toán lỗi', tone: 'danger' as const }
     : { label: externalPaymentStatus || 'Chưa có dữ liệu thanh toán', tone: 'neutral' as const };
-
-  const guard = order.cancellationGuard;
-  const canCancel = guard
-    ? guard.can_cancel
-    : order.status === 'placed' || order.status === 'confirmed' || order.status === 'packed';
 
   return (
     <header className="relative grid gap-5 rounded-lg border border-metric-ink bg-channel-paper p-5 shadow-metric sm:p-7">
@@ -197,26 +190,9 @@ export function OrderDetailHeader({
             Phiếu soạn hàng
           </Button> : null}
 
-          {/* Cancellation Trigger */}
-          {order.status !== 'delivered' && order.status !== 'cancelled' ? (
-            <Button
-              variant="ghost"
-              size="md"
-              disabled={busy || !canCancel}
-              onClick={onOpenCancelModal}
-              title={canCancel ? 'Hủy đơn hàng này' : 'Không thể hủy đơn'}
-              className={`font-medium ${
-                canCancel
-                  ? 'text-danger hover:bg-danger/10'
-                  : 'text-graphite/60 cursor-not-allowed opacity-60'
-              }`}
-            >
-              <span className="material-symbols-outlined text-[18px] mr-1" aria-hidden="true">
-                cancel
-              </span>
-              Hủy đơn
-            </Button>
-          ) : null}
+          {/* Cancellation lives in the overview tab as an inline form: one "Hủy đơn" control,
+              disabled until a reason is typed, so a cashier cannot fire a restocking cancel
+              without leaving the only record of why. */}
         </div>
       </div>
 

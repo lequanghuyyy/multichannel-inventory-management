@@ -23,6 +23,7 @@ export interface VariantEditorProps {
 export function VariantEditor({ productId, productVersion, currency, variant, canWrite, disabledReason, onUpdated, onClose }: VariantEditorProps) {
   const [canonical, setCanonical] = useState(variant);
   const [baseVersion, setBaseVersion] = useState(productVersion);
+  const [title, setTitle] = useState(variant.title || '');
   const [color, setColor] = useState(variant.color);
   const [size, setSize] = useState(variant.size);
   const [sku, setSku] = useState(variant.sku);
@@ -32,7 +33,9 @@ export function VariantEditor({ productId, productVersion, currency, variant, ca
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const attempt = useRef<{ payload: string; key: string } | null>(null);
+
   const dirty = sku.trim() !== canonical.sku
+    || title.trim() !== (canonical.title || '')
     || (color.trim() !== '' && color.trim() !== canonical.color)
     || (size.trim() !== '' && size.trim() !== canonical.size)
     || price.trim() !== (canonical.priceMinor?.toString() ?? '');
@@ -42,6 +45,7 @@ export function VariantEditor({ productId, productVersion, currency, variant, ca
     setBaseVersion(productVersion);
     setCanonical(variant);
     setSku(variant.sku);
+    setTitle(variant.title || '');
     setColor(variant.color);
     setSize(variant.size);
     setPrice(variant.priceMinor?.toString() ?? '');
@@ -51,9 +55,11 @@ export function VariantEditor({ productId, productVersion, currency, variant, ca
     const next: UpdateVariantInput = explicit ? { ...explicit } : {};
     if (!explicit) {
       const nextSku = sku.trim();
+      const nextTitle = title.trim();
       const nextColor = color.trim();
       const nextSize = size.trim();
       if (nextSku !== canonical.sku) next.sku = nextSku;
+      if (nextTitle && nextTitle !== (canonical.title || '')) next.title = nextTitle;
       if (nextColor && nextColor !== canonical.color) next.color = nextColor;
       if (nextSize && nextSize !== canonical.size) next.size = nextSize;
       const nextPrice = price.trim();
@@ -76,38 +82,47 @@ export function VariantEditor({ productId, productVersion, currency, variant, ca
       if (next.sku && (!next.reason || next.reason.length > 500)) { setError('Lý do đổi SKU là bắt buộc và tối đa 500 ký tự.'); return; }
       if (Object.keys(next).length === 0) { setError('Không có thuộc tính hợp lệ nào thay đổi.'); return; }
     }
-    // Every catalog edit uses the revision shown on the page. Price edits require it at the
-    // API boundary; sending it for the other fields also prevents a stale form overwriting a
-    // newer SKU or option value.
     next.expected_product_version = baseVersion;
     const payload = JSON.stringify(next);
-    if (!attempt.current || attempt.current.payload !== payload) attempt.current = { payload, key: newIdempotencyKey(`variant-${variant.id}`) };
-    setBusy(true); setError(null); setSaved(null);
+    if (!attempt.current || attempt.current.payload !== payload) {
+      attempt.current = { payload, key: newIdempotencyKey(`variant-${variant.id}`) };
+    }
+    setBusy(true);
+    setError(null);
+    setSaved(null);
     try {
       const updated = await updateVariant(productId, variant.id, next, attempt.current.key);
       const nextCanonical: ProductApiVariant = {
         ...canonical,
         sku: updated.sku,
-        color: updated.color ?? '',
-        colorDescription: updated.color_description ?? '',
-        size: updated.size ?? '',
-        priceMinor: updated.price_minor ?? null,
-        barcode: updated.barcode ?? '',
-        isActive: updated.is_active,
-        variantIsActive: updated.variant_is_active,
-        onHand: updated.on_hand,
+        title: updated.title,
+        color: (updated as any).color ?? color,
+        colorDescription: (updated as any).color_description ?? canonical.colorDescription,
+        size: (updated as any).size ?? size,
+        priceMinor: updated.priceMinor,
+        barcode: (updated as any).barcode ?? canonical.barcode,
+        isActive: (updated as any).is_active ?? canonical.isActive,
+        variantIsActive: (updated as any).variant_is_active ?? (explicit?.is_active !== undefined ? explicit.is_active : canonical.variantIsActive),
+        onHand: updated.onHand,
         reserved: updated.reserved,
-        safetyBuffer: updated.safety_buffer,
-        availableToSell: updated.available_to_sell,
+        safetyBuffer: updated.safetyBuffer,
+        availableToSell: updated.availableToSell,
       };
       setCanonical(nextCanonical);
-      setSku(nextCanonical.sku); setColor(nextCanonical.color); setSize(nextCanonical.size);
+      setSku(nextCanonical.sku);
+      setTitle(nextCanonical.title || '');
+      setColor(nextCanonical.color);
+      setSize(nextCanonical.size);
       setPrice(nextCanonical.priceMinor?.toString() ?? '');
-      setReason(''); setSaved(nextCanonical.sku); attempt.current = null;
+      setReason('');
+      setSaved(nextCanonical.sku);
+      attempt.current = null;
       onUpdated();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Không lưu được biến thể.');
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+    }
   };
 
   const renaming = sku.trim() !== canonical.sku;
@@ -119,6 +134,7 @@ export function VariantEditor({ productId, productVersion, currency, variant, ca
       </header>
       <div className="grid gap-3 sm:grid-cols-2">
         <Input label="SKU" value={sku} maxLength={64} onChange={(event) => { setSku(event.target.value); setError(null); }} disabled={busy || !canWrite} />
+        <Input label="Tên biến thể (tiêu đề)" value={title} maxLength={120} onChange={(event) => { setTitle(event.target.value); setError(null); }} disabled={busy || !canWrite} />
         <Input label="Màu" value={color} maxLength={64} onChange={(event) => { setColor(event.target.value); setError(null); }} disabled={busy || !canWrite} />
         <Input label="Kích cỡ" value={size} maxLength={32} onChange={(event) => { setSize(event.target.value); setError(null); }} disabled={busy || !canWrite} />
         <Input label={`Giá bán (${currency})`} type="number" min={0} step={1} inputMode="numeric" value={price} hint="Để trống để bỏ giá; số 0 là giá hợp lệ." onChange={(event) => { setPrice(event.target.value); setError(null); }} disabled={busy || !canWrite} />

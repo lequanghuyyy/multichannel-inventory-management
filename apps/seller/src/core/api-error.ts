@@ -48,10 +48,29 @@ export class ApiRequestError extends Error {
 }
 
 export function parseApiError(value: unknown): ApiError {
-  if (!record(value) || !record(value.error) || typeof value.error.code !== 'string' || typeof value.error.message !== 'string' || typeof value.error.request_id !== 'string' || (value.error.details !== undefined && !record(value.error.details))) {
+  if (!record(value)) {
     throw new Error('Phản hồi lỗi không đúng định dạng.');
   }
-  return value.error as unknown as ApiError;
+  if (record(value.error)) {
+    const err = value.error;
+    if (typeof err.code === 'string' && typeof err.message === 'string') {
+      return {
+        code: err.code,
+        message: err.message,
+        details: record(err.details) ? err.details : undefined,
+        request_id: typeof err.request_id === 'string' ? err.request_id : (typeof err.requestId === 'string' ? err.requestId : ''),
+      };
+    }
+  }
+  if (typeof value.code === 'string' && typeof value.message === 'string') {
+    return {
+      code: value.code,
+      message: value.message,
+      details: record(value.details) ? (value.details as Record<string, unknown>) : undefined,
+      request_id: typeof value.request_id === 'string' ? value.request_id : (typeof value.requestId === 'string' ? (value.requestId as string) : ''),
+    };
+  }
+  throw new Error('Phản hồi lỗi không đúng định dạng.');
 }
 
 /**
@@ -61,10 +80,25 @@ export function parseApiError(value: unknown): ApiError {
  * `openapi-fetch`'s `error` value `never`. The body is still there on the wire, so server-path
  * adapters parse `response` instead of narrowing a value the type system says cannot exist.
  */
-export async function responseApiError(response: Response, fallback = 'Không kết nối được máy chủ. Hãy thử lại sau.'): Promise<never> {
-  if (response.headers.get('content-type')?.includes('application/json')) {
+export async function responseApiError(
+  response: Response,
+  fallback = 'Không kết nối được máy chủ. Hãy thử lại sau.',
+  errorBody?: unknown,
+): Promise<never> {
+  if (errorBody && typeof errorBody === 'object') {
     try {
-      const body: unknown = await response.json();
+      throw new ApiRequestError(parseApiError(errorBody), response.status);
+    } catch (err) {
+      if (err instanceof ApiRequestError) throw err;
+    }
+  }
+
+  const target = (response as any)._clone ?? response;
+  const contentType = response.headers?.get('content-type') || target.headers?.get('content-type');
+  if (contentType?.includes('application/json')) {
+    try {
+      const body: unknown = (response as any)._bodyJson ?? await target.json();
+      (response as any)._bodyJson = body;
       throw new ApiRequestError(parseApiError(body), response.status);
     } catch (error) {
       if (error instanceof ApiRequestError) throw error;

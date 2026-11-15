@@ -3,12 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiRequestError } from '../../core/api-error';
 import { InventoryDetailPage } from './InventoryDetailPage';
 
-const { adjustInventory, getInventoryAdjustmentLedger, getInventoryBySku } = vi.hoisted(() => ({
+const { adjustInventory, getInventoryAdjustmentLedger, getInventoryBySku, getInventoryReceipts } = vi.hoisted(() => ({
   adjustInventory: vi.fn(),
   getInventoryAdjustmentLedger: vi.fn(),
   getInventoryBySku: vi.fn(),
+  getInventoryReceipts: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
 }));
-vi.mock('../../api/inventory', () => ({ adjustInventory, getInventoryAdjustmentLedger, getInventoryBySku }));
+vi.mock('../../api/inventory', () => ({ adjustInventory, getInventoryAdjustmentLedger, getInventoryBySku, getInventoryReceipts }));
 
 const snapshot = {
   variant_id: 'variant-42', product_id: 'product-1', sku: 'SHOE-001-BLK-42', color: 'BLACK', size: '42',

@@ -128,7 +128,7 @@ export function ProductCatalogEditor({ product, canWrite, disabledReason, onUpda
     setSaved(false);
     try {
       const result = await updateProductCatalog(product.id, input, attempt.current.key);
-      setBaseVersion(result.product_version);
+      setBaseVersion(result.product_version ?? baseVersion);
       setDraft(draftFrom(toProductApiDetail(result)));
       setReason('');
       attempt.current = null;

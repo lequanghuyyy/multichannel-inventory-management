@@ -141,7 +141,7 @@ export function ReceiptCreatePage() {
           expected_quantity: expectedQty,
           ...(unitCostMinor !== undefined ? { unit_cost_minor: unitCostMinor } : {}),
           productName: matched?.product_name || cleanSku,
-          variantInfo: matched ? `${matched.color} · ${matched.size}` : undefined,
+          variantInfo: matched?.variant_title || undefined,
           currentOnHand: matched?.on_hand,
         },
       ]);
@@ -351,7 +351,7 @@ export function ReceiptCreatePage() {
                     onChange={(e) => setChosenSku(e.target.value)}
                   />
                   <datalist id="sku-catalog-list">
-                    {skuCatalog.map((c) => <option key={c.sku} value={c.sku}>{c.product_name} ({c.color} · {c.size}) - Tồn kho: {c.on_hand}</option>)}
+                    {skuCatalog.map((c) => <option key={c.sku} value={c.sku}>{c.product_name ?? c.sku}{c.variant_title ? ` (${c.variant_title})` : ''} - Tồn kho: {c.on_hand}</option>)}
                   </datalist>
                 </div>
                 <div>

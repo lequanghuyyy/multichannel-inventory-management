@@ -13,7 +13,6 @@ import {
 import { formatOrderTime } from '../order.utils';
 import { CopyButton } from './CopyButton';
 import { OrderCustomerDeliverySection } from './OrderCustomerDeliverySection';
-import { OrderItemsTable } from './OrderItemsTable';
 import { OrderFinancialPaymentSection } from './OrderFinancialPaymentSection';
 import { OrderUnifiedShippingSection } from './OrderUnifiedShippingSection';
 
@@ -125,14 +124,46 @@ export function OrderApiDetailPanel({ order, onOpenDetail }: { order: OrderApiRo
         <OrderUnifiedShippingSection order={order} />
       </div>
 
-      {/* Order Items Table & Financial Breakdown */}
+      {/* Order items as a compact list: the ledger renders the preview inside its own table,
+          so a nested <table> here would make "the orders table" ambiguous. The full sortable
+          table lives on the detail page. */}
       <div className="px-5 sm:px-6">
-        <OrderItemsTable
-          items={order.items}
-        />
+        <section className="grid gap-2" aria-label="Dòng hàng trong đơn">
+          <h4 className="font-body text-caption font-semibold uppercase tracking-wider text-graphite">
+            Dòng hàng ({order.items.length})
+          </h4>
+          {order.items.length === 0 ? (
+            <p className="font-body text-caption text-graphite">Không có thông tin dòng sản phẩm.</p>
+          ) : (
+            <ul className="grid gap-2">
+              {order.items.map((item, index) => (
+                <li
+                  key={`${item.sku}-${index}`}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-control bg-surface-container-low p-3 font-body text-caption"
+                >
+                  <div className="min-w-0">
+                    <strong className="block break-words text-on-surface">{item.name}</strong>
+                    <span className="text-graphite">{item.sku} · SL {item.quantity}</span>
+                  </div>
+                  <span className="font-medium text-on-surface">{item.lineTotalFormatted}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
       </div>
 
       <div className="px-5 sm:px-6"><OrderFinancialPaymentSection order={order} /></div>
+
+      {/* Status history: the summary payload carries no timeline, so the panel states that
+          plainly instead of drawing a lifecycle journey the server has not shown here. */}
+      <section className="grid gap-2 border-t border-outline-variant/50 p-5 sm:p-6" aria-label="Lịch sử trạng thái đơn hàng">
+        <h4 className="font-body text-caption font-semibold uppercase tracking-wider text-graphite">
+          Lịch sử trạng thái
+        </h4>
+        <p className="font-body text-body-sm text-graphite">Chưa có lịch sử thay đổi trạng thái của đơn này.</p>
+        <p className="font-body text-caption text-graphite">Dòng thời gian đầy đủ hiển thị ở trang chi tiết đơn hàng.</p>
+      </section>
 
       {externalLines.length > 0 ? (
         <section className="grid gap-3 border-t border-outline-variant/50 p-5 sm:p-6" aria-label="Dòng hàng đã quan sát trên sàn">

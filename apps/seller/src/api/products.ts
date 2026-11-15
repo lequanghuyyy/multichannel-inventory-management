@@ -1,7 +1,7 @@
 import type { components } from './generated/openapi';
 import { apiFetch, createApiClient } from './client';
 import { ApiRequestError, parseApiError, responseApiError } from '../core/api-error';
-import type { Page } from './list';
+import { pageOf, type Page } from './list';
 
 /**
  * Product status as the seller app speaks it.
@@ -10,7 +10,7 @@ import type { Page } from './list';
  * for `PUBLISHED`. Keeping the server's spelling out of the UI avoids two names for one state in
  * every component that renders a badge or offers a lifecycle move.
  */
-export type ProductStatus = 'draft' | 'active' | 'archived';
+export type ProductStatus = 'draft' | 'active' | 'out_of_stock' | 'archived';
 
 export interface ProductVariant {
   id: string;
@@ -48,29 +48,82 @@ export interface ProductSummary {
 
 export interface ProductDetail extends ProductSummary {
   variants: ProductVariant[];
+  product_version?: number;
+  productVersion?: number;
 }
 
 export interface ProductQuery {
+  limit?: number;
+  cursor?: string;
   q?: string;
   status?: ProductStatus;
   category?: string;
 }
 
-export type CreateProductInput = components['schemas']['CreateProductRequest'];
-export type CreateProductVariantInput = components['schemas']['AddProductVariantRequest'];
+export type CreateProductInput = {
+  name: string;
+  master_sku?: string;
+  masterSku?: string;
+  category?: string;
+  brand?: string;
+  description?: string;
+  short_description?: string;
+  shortDescription?: string;
+  attributes?: Record<string, string>;
+  weight_grams?: number | null;
+  length_mm?: number | null;
+  width_mm?: number | null;
+  height_mm?: number | null;
+  condition?: 'new' | 'used' | 'refurbished' | 'for_parts' | string;
+  currency?: string;
+  variants: Array<{
+    sku: string;
+    title?: string;
+    color?: string;
+    size?: string;
+    price?: number;
+    price_minor?: number;
+    priceMinor?: number;
+    currency?: string;
+    barcode?: string;
+    initialStock?: number;
+  }>;
+};
+export type CreateProductVariantInput = Omit<components['schemas']['AddProductVariantRequest'], 'title'> & {
+  title?: string;
+  color?: string;
+  size?: string;
+  price_minor?: number;
+  barcode?: string;
+};
 
 export interface UpdateProductCatalogInput {
   name?: string;
   description?: string;
   category?: string;
   status?: ProductStatus;
+  brand?: string;
+  short_description?: string;
+  attributes?: Record<string, string>;
+  weight_grams?: number | null;
+  length_mm?: number | null;
+  width_mm?: number | null;
+  height_mm?: number | null;
+  condition?: 'new' | 'used' | 'refurbished' | 'for_parts' | '';
+  expected_product_version?: number;
+  reason?: string;
 }
 
 export interface UpdateVariantInput {
   sku?: string;
   title?: string;
-  priceMinor?: number;
+  color?: string;
+  size?: string;
+  is_active?: boolean;
+  priceMinor?: number | null;
+  price_minor?: number | null;
   currency?: string;
+  expected_product_version?: number;
   /** Mandatory when `sku` changes: it is the identifier humans read at receiving. */
   reason?: string;
 }
@@ -87,6 +140,7 @@ const SERVER_STATUS: Readonly<Record<string, ProductStatus>> = {
 const UI_STATUS: Readonly<Record<ProductStatus, string>> = {
   draft: 'DRAFT',
   active: 'PUBLISHED',
+  out_of_stock: 'PUBLISHED',
   archived: 'ARCHIVED',
 };
 
@@ -96,11 +150,15 @@ function toProductStatus(status: string | undefined): ProductStatus {
   return mapped;
 }
 
-function requireId(value: number | undefined, entity: string): string {
-  if (value === undefined || !Number.isSafeInteger(value)) {
+function requireId(value: unknown, entity: string): string {
+  if (value === undefined || value === null) {
     throw new Error(`Phản hồi ${entity} không có mã hợp lệ.`);
   }
-  return String(value);
+  const str = String(value).trim();
+  if (!str) {
+    throw new Error(`Phản hồi ${entity} không có mã hợp lệ.`);
+  }
+  return str;
 }
 
 function toVariant(variant: ServerVariant): ProductVariant {
@@ -150,31 +208,41 @@ function matchesQuery(product: ProductDetail, query: ProductQuery): boolean {
 }
 
 /**
- * `GET /api/v1/products` returns a plain JSON array and accepts no query parameters, so the
- * catalogue filters are applied here. The returned `nextCursor` is always null: pretending
- * there is a server cursor would make `useApiPage` call the same endpoint forever.
+ * `GET /api/v1/products` supports both bare arrays from Spring Boot and legacy envelope shapes.
  */
 export async function listProducts(query: ProductQuery = {}, signal?: AbortSignal): Promise<Page<ProductSummary>> {
   const client = createApiClient();
-  const { data, response } = await client.GET('/api/v1/products', { signal, cache: 'no-store' });
+  const { data, response } = await client.GET('/api/v1/products', {
+    params: { query: query as any },
+    signal,
+    cache: 'no-store',
+  });
 
   if (!response.ok) await responseApiError(response);
-  if (!Array.isArray(data)) throw new Error('Dữ liệu danh mục sản phẩm nhận về không hợp lệ.');
-  const items = data.map(toProduct).filter((product) => matchesQuery(product, query));
-  return { items, nextCursor: null };
+  if (!data) throw new Error('Dữ liệu danh mục sản phẩm nhận về không hợp lệ.');
+
+  if (Array.isArray(data)) {
+    const items = data.map(toProduct).filter((product) => matchesQuery(product, query));
+    return { items, nextCursor: null, totalCount: items.length };
+  }
+
+  return pageOf<ProductSummary>(data as unknown as Record<string, unknown>, 'products');
 }
 
 export async function getProduct(productId: string, signal?: AbortSignal): Promise<ProductDetail> {
   const client = createApiClient();
   const { data, response } = await client.GET('/api/v1/products/{id}', {
-    params: { path: { id: Number(productId) } },
+    params: { path: { id: productId as any } },
     signal,
     cache: 'no-store',
   });
 
   if (!response.ok) await responseApiError(response);
   if (!data) throw new Error('Dữ liệu chi tiết sản phẩm nhận về không hợp lệ.');
-  return toProduct(data);
+  if (typeof (data as any).id === 'number') {
+    return toProduct(data);
+  }
+  return data as unknown as ProductDetail;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -183,6 +251,7 @@ export async function getProduct(productId: string, signal?: AbortSignal): Promi
 // ---------------------------------------------------------------------------------------------
 
 export type ProductChannelPublication = components['schemas']['ProductChannelPublication'];
+export type ProductPublicationCollection = components['schemas']['ProductPublicationCollection'];
 export type PublicationActionInput = components['schemas']['PublicationActionRequest'];
 export type PublicationPreview = components['schemas']['PublicationPreview'];
 export type PublicationRequestResult = components['schemas']['PublicationRequestResult'];
@@ -357,9 +426,22 @@ export async function deleteProductMedia(productId: string, mediaId: string, exp
 
 export async function createProduct(input: CreateProductInput, idempotencyKey: string, signal?: AbortSignal): Promise<ProductDetail> {
   const client = createApiClient();
+  const body = {
+    ...input,
+    name: input.name,
+    category: input.category,
+    description: input.description,
+    variants: input.variants.map((v) => ({
+      ...v,
+      sku: v.sku,
+      title: v.title || [v.color, v.size].filter(Boolean).join(' / ') || v.sku || 'Mặc định',
+      price: v.price !== undefined ? v.price : (v.price_minor !== undefined ? v.price_minor : (v.priceMinor !== undefined ? v.priceMinor : undefined)),
+      currency: v.currency ?? input.currency ?? 'VND',
+    })),
+  };
   const { data, response } = await client.POST('/api/v1/products', {
     params: { header: { 'Idempotency-Key': idempotencyKey } },
-    body: input,
+    body: body as any,
     signal,
   });
   if (!response.ok) await responseApiError(response);
@@ -368,10 +450,13 @@ export async function createProduct(input: CreateProductInput, idempotencyKey: s
 }
 
 /** `PATCH /products/{id}` takes no `Idempotency-Key`; only the two create routes do. */
-export async function updateProductCatalog(productId: string, input: UpdateProductCatalogInput, signal?: AbortSignal): Promise<ProductDetail> {
+export async function updateProductCatalog(productId: string, input: UpdateProductCatalogInput, idempotencyKey?: string, signal?: AbortSignal): Promise<ProductDetail> {
   const client = createApiClient();
   const { data, response } = await client.PATCH('/api/v1/products/{id}', {
-    params: { path: { id: Number(productId) } },
+    params: {
+      path: { id: Number(productId) },
+      ...(idempotencyKey ? { header: { 'Idempotency-Key': idempotencyKey } } : {}),
+    } as any,
     body: {
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(input.description !== undefined ? { description: input.description } : {}),
@@ -387,9 +472,17 @@ export async function updateProductCatalog(productId: string, input: UpdateProdu
 
 export async function createProductVariant(productId: string, input: CreateProductVariantInput, idempotencyKey: string, signal?: AbortSignal): Promise<ProductVariant> {
   const client = createApiClient();
+  const title = input.title || [input.color, input.size].filter(Boolean).join(' / ') || 'Một biến thể';
+  const price = input.price !== undefined ? input.price : (input.price_minor !== undefined ? input.price_minor : undefined);
   const { data, response } = await client.POST('/api/v1/products/{id}/variants', {
     params: { path: { id: Number(productId) }, header: { 'Idempotency-Key': idempotencyKey } },
-    body: input,
+    body: {
+      sku: input.sku,
+      title,
+      currency: input.currency ?? 'VND',
+      ...(price !== undefined ? { price } : {}),
+      ...(input.initialStock !== undefined ? { initialStock: input.initialStock } : {}),
+    },
     signal,
   });
   if (!response.ok) await responseApiError(response);
@@ -405,12 +498,13 @@ export async function createProductVariant(productId: string, input: CreateProdu
  */
 export const PRODUCT_TRANSITIONS: Readonly<Record<ProductStatus, readonly ProductStatus[]>> = {
   draft: ['active', 'archived'],
-  active: ['archived'],
-  archived: ['draft'],
+  active: ['out_of_stock', 'archived'],
+  out_of_stock: ['active', 'archived'],
+  archived: [],
 };
 
-export async function transitionProduct(productId: string, status: ProductStatus, signal?: AbortSignal): Promise<ProductDetail> {
-  return updateProductCatalog(productId, { status }, signal);
+export async function transitionProduct(productId: string, status: ProductStatus, idempotencyKey?: string, signal?: AbortSignal): Promise<ProductDetail> {
+  return updateProductCatalog(productId, { status }, idempotencyKey, signal);
 }
 
 /**
@@ -419,14 +513,18 @@ export async function transitionProduct(productId: string, status: ProductStatus
  *
  * `PATCH /products/{id}/variants/{variantId}` takes no `Idempotency-Key`.
  */
-export async function updateVariant(productId: string, variantId: string, input: UpdateVariantInput, signal?: AbortSignal): Promise<ProductVariant> {
+export async function updateVariant(productId: string, variantId: string, input: UpdateVariantInput, idempotencyKey?: string, signal?: AbortSignal): Promise<ProductVariant> {
   const client = createApiClient();
+  const price = input.priceMinor !== undefined ? input.priceMinor : input.price_minor;
   const { data, response } = await client.PATCH('/api/v1/products/{id}/variants/{variantId}', {
-    params: { path: { id: Number(productId), variantId: Number(variantId) } },
+    params: {
+      path: { id: Number(productId), variantId: Number(variantId) },
+      ...(idempotencyKey ? { header: { 'Idempotency-Key': idempotencyKey } } : {}),
+    } as any,
     body: {
       ...(input.sku !== undefined ? { sku: input.sku } : {}),
       ...(input.title !== undefined ? { title: input.title } : {}),
-      ...(input.priceMinor !== undefined ? { price: input.priceMinor } : {}),
+      ...(price !== undefined ? { price: price === null ? undefined : price } : {}),
       ...(input.currency !== undefined ? { currency: input.currency } : {}),
       ...(input.reason !== undefined ? { reason: input.reason } : {}),
     },

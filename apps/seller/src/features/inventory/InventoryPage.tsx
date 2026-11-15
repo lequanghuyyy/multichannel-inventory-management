@@ -19,7 +19,10 @@ import { toInventoryLedgerRow } from './inventory.api';
 import type { InventoryFilters, InventoryLedgerRow } from './inventory.types';
 import { filterInventoryRows, initialInventoryFilters } from './inventory.utils';
 
-const INVENTORY_PAGE_SIZE = 20;
+// The keyset walk reads 50 rows per page — the same number the API is asked for. The ledger's
+// local pager slices this array; the cursor limit and the slice size must be one number or the
+// "load more" control and the page counter describe different data.
+const INVENTORY_PAGE_SIZE = 50;
 
 export function InventoryPage({ mode = 'default' }: { mode?: DemoMode }) {
   // The loader is inline on purpose: useApiPage holds it in a ref, so its identity changing
@@ -176,7 +179,9 @@ export function InventoryPage({ mode = 'default' }: { mode?: DemoMode }) {
           totalRows={filteredRows.length}
           hasMore={page.hasMore}
           loadingMore={page.loadingMore}
-          loadMoreError={page.loadingMore ? null : page.error}
+          loadMoreError={page.loadingMore || source !== 'api' ? null : page.error}
+          source={source}
+          onLoadMore={page.loadMore}
           currentPage={currentPage}
           totalPages={totalPages}
           canGoForward={currentPage < totalPages || page.hasMore}
