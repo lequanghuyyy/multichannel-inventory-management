@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { ApiRequestError } from '../../core/api-error';
 import { login as loginRequest, restoreSession, revokeSession, type AuthUser } from './auth.api';
 import { activateRuntimeAuth, clearRuntimeAuth, onUnauthorized, runtimeAuthGeneration } from './auth-runtime';
-import { isNativeSession, loadNativeSessionToken, removeNativeSessionToken, saveNativeSessionToken } from './native-session-storage';
+import { isNativeSession, loadNativeSessionToken, removeNativeSessionToken } from './native-session-storage';
 
 type AuthStatus = 'loading' | 'authenticated' | 'anonymous' | 'error';
 
@@ -64,7 +64,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
         const session = await restoreSession();
         if (controller.signal.aborted) return;
-        activateRuntimeAuth({ bearer: isNativeSession() ? token : '', csrf: 'csrf_token' in session ? session.csrf_token ?? '' : '' });
+        activateRuntimeAuth({ bearer: isNativeSession() ? token : '', csrf: session.csrf_token });
         setUser(session.user);
         setStatus('authenticated');
       } catch (nextError: unknown) {
@@ -90,23 +90,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (loginInFlight.current) return loginInFlight.current;
     const task = (async () => {
       const session = await loginRequest(email, password);
-      const token = 'session_token' in session ? session.session_token ?? '' : '';
-      if (isNativeSession()) {
-        if (!token) throw new Error('Mobile login did not return a session token.');
-        activateRuntimeAuth({ bearer: token });
-        try {
-          await saveNativeSessionToken(token);
-        } catch (storageError) {
-          try {
-            await revokeSession();
-          } catch {
-            // The token was never persisted, so a failed compensating revoke cannot re-authenticate this device.
-          }
-          clearRuntimeAuth();
-          throw storageError;
-        }
-      }
-      activateRuntimeAuth({ bearer: isNativeSession() ? token : '', csrf: 'csrf_token' in session ? session.csrf_token ?? '' : '' });
+      activateRuntimeAuth({ csrf: session.csrf_token });
       setUser(session.user);
       setError(null);
       setStatus('authenticated');

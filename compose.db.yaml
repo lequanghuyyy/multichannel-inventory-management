@@ -1,0 +1,32 @@
+# Dedicated development database for this phase.
+#
+# The older `datt-*` compose project is intentionally NOT reused: its volume carries the state
+# from earlier phases and lives outside this working directory. This stack owns its own project
+# name, volume and host port, so it can be recreated from scratch without touching that one.
+#
+#   docker compose -f compose.db.yaml up -d
+#   API: DB_URL=jdbc:postgresql://localhost:5433/octoflow DB_USER=octoflow DB_PASSWORD=octoflow_dev
+name: datt-phase05
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: datt-phase05-db
+    environment:
+      POSTGRES_USER: octoflow
+      POSTGRES_PASSWORD: octoflow_dev
+      POSTGRES_DB: octoflow
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U octoflow -d octoflow"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    name: datt-phase05-postgres-data

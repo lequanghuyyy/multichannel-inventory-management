@@ -541,16 +541,26 @@ public class ReceiptServiceImpl implements ReceiptService {
         Set<Long> seenVariantIds = new HashSet<>();
         List<ReceiptItem> items = new ArrayList<>(itemRequests.size());
         for (CreateReceiptRequest.ReceiptItemRequest itemRequest : itemRequests) {
-            if (itemRequest == null || itemRequest.variantId() == null) {
+            if (itemRequest == null) {
                 throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "Dòng phiếu nhập không hợp lệ.");
             }
-            if (!seenVariantIds.add(itemRequest.variantId())) {
+            ProductVariant variant;
+            if (itemRequest.variantId() != null) {
+                variant = variantRepository.findById(itemRequest.variantId())
+                        .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.VARIANT_NOT_FOUND,
+                                "Không tìm thấy biến thể #" + itemRequest.variantId()));
+            } else if (itemRequest.sku() != null && !itemRequest.sku().isBlank()) {
+                String sku = itemRequest.sku().trim();
+                variant = variantRepository.findBySku(sku)
+                        .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.SKU_NOT_FOUND,
+                                "Không tìm thấy SKU " + sku));
+            } else {
+                throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "Dòng phiếu nhập không hợp lệ.");
+            }
+            if (!seenVariantIds.add(variant.getId())) {
                 throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
                         "Mỗi biến thể chỉ được xuất hiện một lần trong phiếu nhập.");
             }
-            ProductVariant variant = variantRepository.findById(itemRequest.variantId())
-                    .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.VARIANT_NOT_FOUND,
-                            "Không tìm thấy biến thể #" + itemRequest.variantId()));
             int expectedQty = requireQuantity(itemRequest.expectedQty(), "Số lượng dự kiến", 1);
             long unitCost = itemRequest.unitCost() == null ? 0L : itemRequest.unitCost();
             if (unitCost < 0) {

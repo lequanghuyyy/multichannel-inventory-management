@@ -568,7 +568,7 @@ export function ReceiptDetailPage({ id }: { id: string }) {
     const key = cancelKeyRef.current;
 
     try {
-      const updated = await cancelReceipt(id, { reason: cancelReason.trim() }, key);
+      const updated = await cancelReceipt(id, { reason: cancelReason.trim(), expected_version: receipt.version }, key);
       setReceipt(updated);
       setCancelModalOpen(false);
       resetCancelKey();

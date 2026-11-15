@@ -2,19 +2,12 @@ import type { ProductSummary } from '../../api/products';
 import type { ProductStatus } from './product.types';
 
 /**
- * The ledger row an API product renders as.
+ * The ledger row a live catalogue product renders as.
  *
- * A separate shape from `ProductCatalogItem` on purpose. That type describes a prototype
- * product: variants with prices and barcodes, channel bindings, a sellable-rate percentage, a
- * created/updated timestamp. `ProductSummary` carries NONE of those — no variant SKUs, no
- * price, no channel state, no timestamps. Trying to fill one from the other is where an N+1
- * `GET /api/v1/products/{id}` per row would come from, or worse, where a fixture value would
- * be printed next to a live one and read as the same fact.
- *
- * The one thing `ProductSummary` genuinely cannot supply is a price: the contract sums
- * inventory in SQL and then stops, and a per-row detail fetch to recover prices would be a
- * request per catalogue row. So the table has no price column at all, rather than one that
- * says "Chưa có giá" down its entire length.
+ * `ProductResponse` carries the fields below and the variant rows, but no master SKU, brand or
+ * primary media id. Those three stay in the shape because the table columns exist, and they are
+ * filled with honest blanks rather than a fixture value: a product without a business code in
+ * the backend should read as "no code", not borrow another product's.
  */
 export interface ProductApiRow {
   id: string;
@@ -22,7 +15,7 @@ export interface ProductApiRow {
   masterSku: string;
   brand: string;
   category: string;
-  /** `products.status` is the API enum; it is a subset of the fixture's wider union. */
+  /** The app's status union; `active` is the server's `PUBLISHED`. */
   status: ProductStatus;
   /** Authenticated content identifier for the product's primary image, if present. */
   primaryMediaId?: string;
@@ -31,9 +24,8 @@ export interface ProductApiRow {
   reserved: number;
   safetyBuffer: number;
   /**
-   * Read from the API. The contract is explicit that this is summed in SQL over every variant
-   * of the product and must never be re-derived from a page of variant rows — this screen has
-   * no variant rows, so the temptation does not arise, but the number is still taken as given.
+   * Summed from the server-owned per-variant `available_to_sell`. It is never re-derived from
+   * on-hand arithmetic here.
    */
   availableToSell: number;
 }
@@ -42,38 +34,24 @@ export function toProductApiRow(summary: ProductSummary): ProductApiRow {
   return {
     id: summary.id,
     name: summary.name,
-    // master_sku is optional and legitimately null for a product that predates the 00004
-    // backfill; the contract calls it a business code, so it is never derived from the name.
-    masterSku: summary.master_sku ?? '',
-    brand: summary.brand ?? '',
+    masterSku: '',
+    brand: '',
     category: summary.category,
     status: summary.status,
-    primaryMediaId: summary.primary_media_id,
-    variantCount: summary.variant_count,
-    onHand: summary.on_hand,
+    primaryMediaId: undefined,
+    variantCount: summary.variantCount,
+    onHand: summary.onHand,
     reserved: summary.reserved,
-    safetyBuffer: summary.safety_buffer,
-    availableToSell: summary.available_to_sell,
+    safetyBuffer: summary.safetyBuffer,
+    availableToSell: summary.availableToSell,
   };
 }
 
 /**
- * Filters API rows.
+ * Filters API rows on the page already in hand.
  *
- * The backend can filter by status and by a name prefix search; everything else is done here
- * on the one page in hand, and deliberately so — see the note on `q` below.
- *
- * `q` is matched against the name, master SKU, brand and category. The prototype's search box
- * also promises variant SKUs, and a `ProductSummary` has none — matching them would need the
- * detail endpoint, once per row. Rather than quietly search a narrower set than the
- * placeholder claims, this takes `extraFor`, a resolver the caller supplies PER ROW for terms
- * it has already looked up, which is `undefined` today: the products screen has no second
- * source to resolve them from.
- *
- * Per row, and not a shared list of terms. An earlier version took a plain array and appended
- * it to every row's haystack, which meant supplying one term made the query match every row on
- * the page — the search box stopped discriminating at exactly the moment it was given something
- * extra to discriminate on.
+ * The server list endpoint takes no query parameters, so this is the only filter. `extraFor` is
+ * still per row: a shared list of terms would make one term match every row.
  */
 export function filterProductApiRows(
   rows: readonly ProductApiRow[],
@@ -98,8 +76,8 @@ export function filterProductApiRows(
  * The four aggregates a catalogue totals row needs, counted from the rows on screen.
  *
  * `outOfStock` counts products whose available-to-sell is zero rather than reading `status`:
- * a product can be `active` and sell nothing, and a totals card that counted statuses would
- * miss exactly the ones a shopkeeper needs to see.
+ * a published product can sell nothing, and a totals card that counted statuses would miss
+ * exactly the ones a shopkeeper needs to see.
  */
 export function summariseProducts(rows: readonly ProductApiRow[]): { products: number; variants: number; lowStock: number; outOfStock: number } {
   return {

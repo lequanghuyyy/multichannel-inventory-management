@@ -1,17 +1,29 @@
+import type { components } from './generated/openapi';
 import { createApiClient } from './client';
-import { ApiRequestError, parseApiError } from '../core/api-error';
-import { pageOf, type Page } from './list';
+import { ApiRequestError, parseApiError, responseApiError } from '../core/api-error';
+import type { Page } from './list';
+
+type ServerChannel = components['schemas']['ChannelResponse'];
+type ServerListing = components['schemas']['ChannelListingResponse'];
 
 export type Channel = {
   id: string;
   code: string;
   name: string;
+  /**
+   * A display bucket, not a server field. Spring Boot stores the channel code; the UI filters
+   * by a small vocabulary, so the code is translated here once instead of in every panel.
+   */
   type: string;
   environment: string;
   status: string;
   last_error?: string;
   last_sync?: string;
-  mapping_count: number;
+  /**
+   * Spring Boot does not aggregate listings on the channel row. The grid shows a dash rather
+   * than inventing a count; the channel detail page loads the actual listings.
+   */
+  mapping_count?: number;
 };
 
 export type ChannelMapping = {
@@ -192,56 +204,162 @@ export interface ChannelMappingQuery extends ChannelQuery {
   issue_cursor?: string;
 }
 
-export async function listChannels(query: ChannelQuery = {}, signal?: AbortSignal): Promise<Page<Channel>> {
-  const client = createApiClient();
-  const { data, error, response } = await client.GET('/api/v1/channels', {
-    params: { query }, signal, cache: 'no-store',
-  });
-  if (!response.ok) {
-    if (error && typeof error === 'object') throw new ApiRequestError(parseApiError(error), response.status);
-    throw new Error('Không kết nối được máy chủ. Hãy thử lại sau.');
+function requireId(value: number | undefined, entity: string): string {
+  if (value === undefined || !Number.isSafeInteger(value)) {
+    throw new Error(`Phản hồi ${entity} không có mã hợp lệ.`);
   }
-  if (!data) throw new Error('Dữ liệu danh sách kênh bán nhận về không hợp lệ.');
-  return pageOf<Channel>(data as unknown as Record<string, unknown>, 'channels');
+  return String(value);
+}
+
+function channelType(code: string, environment: string): string {
+  if (environment.toLowerCase() === 'simulated' || code.startsWith('simulator') || code.startsWith('load-')) return 'simulator';
+  if (code === 'web' || code === 'website') return 'website';
+  if (code === 'pos') return 'pos';
+  return 'marketplace';
+}
+
+function toChannel(channel: ServerChannel): Channel {
+  const code = channel.code ?? '';
+  return {
+    id: requireId(channel.id, 'kênh bán'),
+    code,
+    name: channel.name ?? code,
+    type: channelType(code, channel.environment ?? ''),
+    environment: channel.environment ?? '',
+    status: (channel.status ?? 'DISCONNECTED').toLowerCase(),
+  };
+}
+
+function mappingStatus(value: string | undefined): ChannelMapping['mapping_status'] {
+  switch ((value ?? '').toUpperCase()) {
+    case 'VERIFIED':
+      return 'verified';
+    default:
+      return 'unverified';
+  }
+}
+
+function syncStatus(value: string | undefined): ChannelMapping['latest_sync_status'] {
+  switch ((value ?? '').toUpperCase()) {
+    case 'SYNCED':
+      return 'VERIFIED';
+    case 'OUT_OF_SYNC':
+      return 'MISMATCH';
+    case 'ERROR':
+      return 'BLOCKED';
+    default:
+      return 'UNVERIFIED';
+  }
+}
+
+/**
+ * Translates one Spring Boot listing into the row the channel screens render.
+ *
+ * The server owns the listing, its quota and its last verified quantity. Fields this app's
+ * legacy ledger used to receive from a richer endpoint (product title, colour, size, barcode,
+ * core balance) are left undefined: printing a fixture value beside live stock would make an
+ * operator trust a number the server never sent.
+ */
+function toMapping(listing: ServerListing, channelId: string, sku?: string): ChannelMapping {
+  const canonicalSku = listing.sku ?? sku ?? '';
+  const revision = listing.target_allocation_revision ?? 0;
+  const latestSync = syncStatus(listing.sync_status);
+  const drifted = latestSync === 'MISMATCH' || latestSync === 'BLOCKED';
+  return {
+    id: requireId(listing.id, 'ánh xạ kênh'),
+    channel_id: String(listing.channel_id ?? channelId),
+    variant_id: requireId(listing.variant_id, 'ánh xạ kênh'),
+    external_sku: listing.external_sku ?? listing.external_variant_id ?? '',
+    external_product_id: listing.external_listing_id,
+    external_variant_id: listing.external_variant_id,
+    inventory_tracking_enabled: listing.active ?? true,
+    mapping_status: mappingStatus(listing.mapping_status),
+    issue_reason: listing.last_sync_error,
+    last_verified_at: listing.mapping_verified_at,
+    canonical_sku: canonicalSku,
+    listed: listing.active ?? true,
+    variant_is_active: listing.active ?? true,
+    pushed_version: revision,
+    target_quantity: listing.allocated_quota ?? null,
+    target_version: revision,
+    reported_on_hand: listing.reported_stock ?? null,
+    pushed_quantity: listing.sent_quantity ?? null,
+    reported_quantity: listing.reported_stock ?? null,
+    quantity_basis: 'ats',
+    latest_sync_status: latestSync,
+    latest_sync_verified_at: listing.last_verified_at,
+    latest_sync_attempt_at: listing.updated_at,
+    latest_sync_error_code: listing.last_sync_error,
+    latest_sync_requested_available: listing.sent_quantity ?? null,
+    latest_sync_remote_after: listing.verified_quantity ?? null,
+    latest_sync_target_version: revision,
+    latest_sync_mutation_acknowledged: listing.acknowledged_quantity !== null && listing.acknowledged_quantity !== undefined,
+    drifted,
+    push_state: latestSync === 'VERIFIED' ? 'current' : drifted ? 'superseded' : 'unknown',
+  };
+}
+
+function summarizeMappings(items: readonly ChannelMapping[]): ChannelProductSummary {
+  const variants = new Set(items.map((item) => item.canonical_sku).filter(Boolean));
+  return {
+    // A listing names a variant, not its product. The server does not expose the relationship
+    // here, so the product count is left at zero rather than guessed from SKUs.
+    product_count: 0,
+    variant_count: variants.size,
+    missing_balance_count: 0,
+    total_on_hand: null,
+    total_reserved: null,
+    total_available_to_sell: null,
+    total_received: 0,
+    pending_inbound: 0,
+    awaiting_shipment: 0,
+    in_transit: 0,
+    pending_return: 0,
+  };
+}
+
+/** `GET /channels` returns a plain array and takes no parameters. */
+export async function listChannels(_query: ChannelQuery = {}, signal?: AbortSignal): Promise<Page<Channel>> {
+  const client = createApiClient();
+  const { data, response } = await client.GET('/api/v1/channels', { signal, cache: 'no-store' });
+  if (!response.ok) await responseApiError(response);
+  if (!Array.isArray(data)) throw new Error('Dữ liệu danh sách kênh bán nhận về không hợp lệ.');
+  const items = data.map(toChannel);
+  return { items, nextCursor: null, totalCount: items.length };
 }
 
 export async function getChannel(channelId: string, signal?: AbortSignal): Promise<Channel> {
   const client = createApiClient();
-  const { data, error, response } = await client.GET('/api/v1/channels/{channelId}', {
-    params: { path: { channelId } }, signal, cache: 'no-store',
+  const { data, response } = await client.GET('/api/v1/channels/{channelId}', {
+    params: { path: { channelId: Number(channelId) } }, signal, cache: 'no-store',
   });
-  if (!response.ok) {
-    if (error && typeof error === 'object') throw new ApiRequestError(parseApiError(error), response.status);
-    throw new Error('Không kết nối được máy chủ. Hãy thử lại sau.');
-  }
+  if (!response.ok) await responseApiError(response);
   if (!data) throw new Error('Dữ liệu chi tiết kênh bán nhận về không hợp lệ.');
-  return data;
+  return toChannel(data);
 }
 
+/** `GET /channels/{channelId}/mappings` returns a plain array; filter parameters are not served. */
 export async function listChannelMappings(
   channelId: string,
-  query: ChannelMappingQuery = {},
+  _query: ChannelMappingQuery = {},
   signal?: AbortSignal,
 ): Promise<ChannelMappingPage> {
   const client = createApiClient();
-  const { data, error, response } = await client.GET('/api/v1/channels/{channelId}/mappings', {
-    params: { path: { channelId }, query }, signal, cache: 'no-store',
+  const { data, response } = await client.GET('/api/v1/channels/{channelId}/mappings', {
+    params: { path: { channelId: Number(channelId) } }, signal, cache: 'no-store',
   });
-  if (!response.ok) {
-    if (error && typeof error === 'object') throw new ApiRequestError(parseApiError(error), response.status);
-    throw new Error('Không kết nối được máy chủ. Hãy thử lại sau.');
-  }
-  if (!data) throw new Error('Dữ liệu ánh xạ SKU nhận về không hợp lệ.');
-  const record = data as unknown as Record<string, unknown>;
-  const page = pageOf<ChannelMapping>(record, 'mappings');
+  if (!response.ok) await responseApiError(response);
+  if (!Array.isArray(data)) throw new Error('Dữ liệu ánh xạ SKU nhận về không hợp lệ.');
+  const items = data.map((listing) => toMapping(listing, channelId));
   return {
-    ...page,
-    summary: record.summary && typeof record.summary === 'object'
-      ? record.summary as ChannelProductSummary
-      : { product_count: 0, variant_count: page.totalCount ?? 0, missing_balance_count: 0, total_on_hand: null, total_reserved: null, total_available_to_sell: null, total_received: 0, pending_inbound: 0, awaiting_shipment: 0, in_transit: 0, pending_return: 0 },
-    issues: Array.isArray(record.issues) ? record.issues as ChannelMappingIssue[] : [],
-    issueCount: typeof record.issue_count === 'number' ? record.issue_count : 0,
-    nextIssueCursor: typeof record.next_issue_cursor === 'string' ? record.next_issue_cursor : null,
+    items,
+    nextCursor: null,
+    totalCount: items.length,
+    summary: summarizeMappings(items),
+    // Spring Boot returns every listing on the channel; it has no separate issue feed.
+    issues: [],
+    issueCount: 0,
+    nextIssueCursor: null,
   };
 }
 

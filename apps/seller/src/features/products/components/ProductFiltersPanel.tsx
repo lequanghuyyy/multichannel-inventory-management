@@ -57,7 +57,7 @@ export function ProductFiltersPanel({ apiCategories = [], filters, onChange, sou
           {categories.map((category) => <option key={category} value={category}>{isApi ? categoryLabel(category) : category}</option>)}
         </Select>
         <Select label="Trạng thái sản phẩm" value={filters.status} onChange={(event) => onChange({ ...filters, status: event.target.value as ProductFilters['status'] })}>
-          {statusOptions.filter((option) => !isApi || option.value !== 'under_review').map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          {statusOptions.filter((option) => !isApi || (option.value !== 'under_review' && option.value !== 'out_of_stock')).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </Select>
         {isApi ? null : (
           <Select label="Kênh bán" value={filters.channel} onChange={(event) => onChange({ ...filters, channel: event.target.value as ProductFilters['channel'] })}>

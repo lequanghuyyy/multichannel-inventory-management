@@ -89,7 +89,7 @@ export function ChannelProductsWorkspace({ channel, canManage, canPublish, publi
     setCoreHasProducts(null);
     if (loading || products.length || filter !== 'not_published' || query.trim()) return;
     const controller = new AbortController();
-    void listProducts({ limit: 1 }, controller.signal).then((page) => {
+    void listProducts({}, controller.signal).then((page) => {
       if (!controller.signal.aborted) setCoreHasProducts(page.items.length > 0 || (page.totalCount ?? 0) > 0);
     }).catch(() => {
       if (!controller.signal.aborted) setCoreHasProducts(null);

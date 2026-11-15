@@ -106,7 +106,7 @@ export function App() {
   else if (route.name === 'receipt-detail' && route.id) page = <ReceiptDetailPage id={route.id} />;
   else if (route.name === 'orders') page = <OrdersPage mode={mode} />;
   else if (route.name === 'order-detail' && route.id) page = <OrderDetailPage id={route.id} mode={mode} />;
-  else if (route.name === 'pos') page = <POSPage mode={mode} userId={auth.user.id} canDiscount={auth.user.role === 'ADMIN'} canManageAllocation={auth.user.role === 'ADMIN'} />;
+  else if (route.name === 'pos') page = <POSPage mode={mode} userId={auth.user.id ?? auth.user.username ?? ''} canDiscount={auth.user.role === 'ADMIN'} canManageAllocation={auth.user.role === 'ADMIN'} />;
   else if (route.name === 'channels') page = <ChannelsPage mode={mode} />;
   else if (route.name === 'channel-detail') page = null;
   else if (route.name === 'sync') page = <SyncPage mode={mode} />;

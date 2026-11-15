@@ -1,6 +1,6 @@
 import { useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { href, navigate } from '../../app/routes';
-import { listProducts, type ProductQuery, type ProductSummary } from '../../api/products';
+import { listProducts, type ProductQuery, type ProductStatus, type ProductSummary } from '../../api/products';
 import { EmptyState, ErrorState, LoadingState } from '../../components/common/ScreenState';
 import { Button } from '../../components/ui/Button';
 import { getProducts, type DemoMode } from '../../mocks/mock-api';
@@ -50,16 +50,20 @@ export function ProductsPage({ mode, canManageCatalog = false }: { mode: DemoMod
       : system.error ? 'Không xác minh được khả năng ghi catalog.'
         : 'Backend không mở catalog write trong môi trường này.';
 
-  const apiQuery = useMemo<Omit<ProductQuery, 'cursor' | 'limit'>>(() => ({
+  // The server list endpoint takes no query parameters. These filters are applied inside
+  // `listProducts` on the full array it returns, so the request key stays stable per filter set.
+  const apiQuery = useMemo<ProductQuery>(() => ({
     ...(deferredQuery ? { q: deferredQuery } : {}),
-    ...(filters.status !== 'all' && filters.status !== 'under_review' ? { status: filters.status as ProductQuery['status'] } : {}),
+    ...(filters.status !== 'all' && filters.status !== 'under_review' && filters.status !== 'out_of_stock'
+      ? { status: filters.status as ProductStatus }
+      : {}),
     ...(filters.category !== 'all' ? { category: filters.category } : {}),
   }), [deferredQuery, filters.category, filters.status]);
   const requestKey = JSON.stringify(apiQuery);
   const loadFixture = useMemo(() => getProducts, []);
   const apiPage = useApiPage<ProductApiRow, ProductCatalogItem>(
-    async (cursor, signal) => {
-      const response = await listProducts({ limit: 50, ...apiQuery, ...(cursor ? { cursor } : {}) }, signal);
+    async (_cursor, signal) => {
+      const response = await listProducts(apiQuery, signal);
       return { items: response.items.map(toProductApiRow), nextCursor: response.nextCursor };
     },
     loadFixture,
@@ -123,7 +127,7 @@ export function ProductsPage({ mode, canManageCatalog = false }: { mode: DemoMod
       <ProductToolbar resultCount={rowsShown} totalCount={apiPage.rows.length} selectedCount={selectedIds.size} filtersActive={filtersActive} viewMode={viewMode} fixtureOnly={apiPage.source === 'fixture'} onReset={resetFilters} onViewModeChange={setViewMode} onExportSelected={isApi ? () => void runExport('selected') : undefined} />
       {apiPage.loading ? <LoadingState label="Đang tải catalog…" /> : null}
       {!apiPage.loading && apiPage.fixtureError ? <ErrorState error={apiPage.fixtureError} retry={apiPage.refresh} /> : null}
-      {!apiPage.loading && !apiPage.fixtureError && apiPage.rows.length === 0 ? <EmptyState title="Chưa có sản phẩm trong catalogue" detail={isApi ? 'API không trả sản phẩm nào cho bộ lọc hiện tại.' : 'Catalog fixture đang ở trạng thái empty.'} /> : null}
+      {!apiPage.loading && !apiPage.fixtureError && rowsShown === 0 ? <EmptyState title="Chưa có sản phẩm trong catalogue" detail={isApi ? 'API không trả sản phẩm nào cho bộ lọc hiện tại.' : 'Catalog fixture đang ở trạng thái empty.'} /> : null}
       {!apiPage.loading && !apiPage.fixtureError && isApi && apiRows.length > 0 ? <ProductApiTable rows={apiRows} totalRows={apiRows.length} selectedIds={selectedIds} onToggle={toggleProduct} onToggleAll={toggleAllVisible} onOpen={(id) => navigate(href({ name: 'product-detail', id }))} hasMore={apiPage.hasMore} loadingMore={apiPage.loadingMore} loadMoreError={apiPage.loadingMore ? null : apiPage.error} onLoadMore={apiPage.loadMore} viewMode={viewMode} /> : null}
       {!apiPage.loading && !apiPage.fixtureError && !isApi && fixtureRows.length > 0 && viewMode === 'table' ? <><div className="hidden lg:block"><ProductTable products={fixtureRows} selectedIds={selectedIds} onToggle={toggleProduct} onToggleAll={toggleAllVisible} onOpen={(id) => navigate(href({ name: 'product-detail', id }))} /></div><div className="lg:hidden"><ProductGrid products={fixtureRows} selectedIds={selectedIds} onToggle={toggleProduct} onOpen={(id) => navigate(href({ name: 'product-detail', id }))} /></div></> : null}
       {!apiPage.loading && !apiPage.fixtureError && !isApi && fixtureRows.length > 0 && viewMode === 'grid' ? <ProductGrid products={fixtureRows} selectedIds={selectedIds} onToggle={toggleProduct} onOpen={(id) => navigate(href({ name: 'product-detail', id }))} /> : null}

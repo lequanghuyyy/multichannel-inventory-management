@@ -1,19 +1,187 @@
-import type { components, operations } from './generated/openapi';
+import type { components } from './generated/openapi';
 import { apiFetch, createApiClient } from './client';
-import { ApiRequestError, parseApiError } from '../core/api-error';
-import { pageOf, type Page } from './list';
+import { ApiRequestError, parseApiError, responseApiError } from '../core/api-error';
+import type { Page } from './list';
 
-export type ProductSummary = components['schemas']['ProductSummary'];
-export type ProductDetail = components['schemas']['ProductDetail'];
-export type ProductStatus = NonNullable<ProductSummary['status']>;
-export type ProductVariant = NonNullable<ProductDetail['variants']>[number];
+/**
+ * Product status as the seller app speaks it.
+ *
+ * The Spring Boot catalogue stores `DRAFT | PUBLISHED | ARCHIVED`; `active` is this app's word
+ * for `PUBLISHED`. Keeping the server's spelling out of the UI avoids two names for one state in
+ * every component that renders a badge or offers a lifecycle move.
+ */
+export type ProductStatus = 'draft' | 'active' | 'archived';
+
+export interface ProductVariant {
+  id: string;
+  sku: string;
+  title: string;
+  priceMinor: number | null;
+  currency: string;
+  onHand: number;
+  reserved: number;
+  safetyBuffer: number;
+  availableToSell: number;
+}
+
+/**
+ * A catalogue row.
+ *
+ * `ProductResponse` has no product-level aggregates, so the totals below are sums of the
+ * server-owned per-variant numbers it does return. They are never derived from
+ * `on_hand - reserved - safety_buffer`: `availableToSell` on each variant is read verbatim.
+ */
+export interface ProductSummary {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  status: ProductStatus;
+  variantCount: number;
+  onHand: number;
+  reserved: number;
+  safetyBuffer: number;
+  availableToSell: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductDetail extends ProductSummary {
+  variants: ProductVariant[];
+}
+
+export interface ProductQuery {
+  q?: string;
+  status?: ProductStatus;
+  category?: string;
+}
+
 export type CreateProductInput = components['schemas']['CreateProductRequest'];
-export type CreateProductVariantInput = components['schemas']['CreateProductVariantRequest'];
-export type UpdateProductCatalogInput = components['schemas']['UpdateProductCatalogRequest'];
-export type ProductMedia = components['schemas']['ProductMedia'];
-export type ProductMediaCollection = components['schemas']['ProductMediaCollection'];
-export type ProductMediaOrderInput = components['schemas']['ProductMediaOrderRequest'];
-export type ProductPublicationCollection = components['schemas']['ProductPublicationCollection'];
+export type CreateProductVariantInput = components['schemas']['AddProductVariantRequest'];
+
+export interface UpdateProductCatalogInput {
+  name?: string;
+  description?: string;
+  category?: string;
+  status?: ProductStatus;
+}
+
+export interface UpdateVariantInput {
+  sku?: string;
+  title?: string;
+  priceMinor?: number;
+  currency?: string;
+  /** Mandatory when `sku` changes: it is the identifier humans read at receiving. */
+  reason?: string;
+}
+
+type ServerProduct = components['schemas']['ProductResponse'];
+type ServerVariant = NonNullable<ServerProduct['variants']>[number];
+
+const SERVER_STATUS: Readonly<Record<string, ProductStatus>> = {
+  DRAFT: 'draft',
+  PUBLISHED: 'active',
+  ARCHIVED: 'archived',
+};
+
+const UI_STATUS: Readonly<Record<ProductStatus, string>> = {
+  draft: 'DRAFT',
+  active: 'PUBLISHED',
+  archived: 'ARCHIVED',
+};
+
+function toProductStatus(status: string | undefined): ProductStatus {
+  const mapped = status ? SERVER_STATUS[status.toUpperCase()] : undefined;
+  if (!mapped) throw new Error(`Máy chủ trả về trạng thái sản phẩm không hợp lệ: ${status ?? '(trống)'}.`);
+  return mapped;
+}
+
+function requireId(value: number | undefined, entity: string): string {
+  if (value === undefined || !Number.isSafeInteger(value)) {
+    throw new Error(`Phản hồi ${entity} không có mã hợp lệ.`);
+  }
+  return String(value);
+}
+
+function toVariant(variant: ServerVariant): ProductVariant {
+  return {
+    id: requireId(variant.id, 'biến thể'),
+    sku: variant.sku ?? '',
+    title: variant.title ?? '',
+    priceMinor: variant.price ?? null,
+    currency: variant.currency ?? 'VND',
+    onHand: variant.on_hand ?? 0,
+    reserved: variant.reserved ?? 0,
+    safetyBuffer: variant.safety_buffer ?? 0,
+    availableToSell: variant.available_to_sell ?? 0,
+  };
+}
+
+function toProduct(product: ServerProduct): ProductDetail {
+  const variants = (product.variants ?? []).map(toVariant);
+  return {
+    id: requireId(product.id, 'sản phẩm'),
+    name: product.name ?? '',
+    description: product.description ?? '',
+    category: product.category ?? '',
+    status: toProductStatus(product.status),
+    variantCount: variants.length,
+    onHand: variants.reduce((total, variant) => total + variant.onHand, 0),
+    reserved: variants.reduce((total, variant) => total + variant.reserved, 0),
+    safetyBuffer: variants.reduce((total, variant) => total + variant.safetyBuffer, 0),
+    availableToSell: variants.reduce((total, variant) => total + variant.availableToSell, 0),
+    createdAt: product.created_at ?? '',
+    updatedAt: product.updated_at ?? '',
+    variants,
+  };
+}
+
+function matchesQuery(product: ProductDetail, query: ProductQuery): boolean {
+  if (query.status && product.status !== query.status) return false;
+  if (query.category && product.category !== query.category) return false;
+  const term = query.q?.trim().toLocaleLowerCase('vi-VN');
+  if (!term) return true;
+  return [
+    product.name,
+    product.category,
+    ...product.variants.map((variant) => variant.sku),
+    ...product.variants.map((variant) => variant.title),
+  ].join(' ').toLocaleLowerCase('vi-VN').includes(term);
+}
+
+/**
+ * `GET /api/v1/products` returns a plain JSON array and accepts no query parameters, so the
+ * catalogue filters are applied here. The returned `nextCursor` is always null: pretending
+ * there is a server cursor would make `useApiPage` call the same endpoint forever.
+ */
+export async function listProducts(query: ProductQuery = {}, signal?: AbortSignal): Promise<Page<ProductSummary>> {
+  const client = createApiClient();
+  const { data, response } = await client.GET('/api/v1/products', { signal, cache: 'no-store' });
+
+  if (!response.ok) await responseApiError(response);
+  if (!Array.isArray(data)) throw new Error('Dữ liệu danh mục sản phẩm nhận về không hợp lệ.');
+  const items = data.map(toProduct).filter((product) => matchesQuery(product, query));
+  return { items, nextCursor: null };
+}
+
+export async function getProduct(productId: string, signal?: AbortSignal): Promise<ProductDetail> {
+  const client = createApiClient();
+  const { data, response } = await client.GET('/api/v1/products/{id}', {
+    params: { path: { id: Number(productId) } },
+    signal,
+    cache: 'no-store',
+  });
+
+  if (!response.ok) await responseApiError(response);
+  if (!data) throw new Error('Dữ liệu chi tiết sản phẩm nhận về không hợp lệ.');
+  return toProduct(data);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Legacy channel-connector surface. The Spring Boot API does not serve these routes yet, so the
+// frozen contract keeps the not-yet-migrated screens compiling. No migrated core flow calls them.
+// ---------------------------------------------------------------------------------------------
+
 export type ProductChannelPublication = components['schemas']['ProductChannelPublication'];
 export type PublicationActionInput = components['schemas']['PublicationActionRequest'];
 export type PublicationPreview = components['schemas']['PublicationPreview'];
@@ -29,46 +197,6 @@ export type ChannelVariantPrice = {
 };
 export type ChannelPriceCollection = { product_id: string; prices: ChannelVariantPrice[] };
 export type SetChannelPriceInput = { currency: string; amount: string; expected_revision: number; reason: string };
-
-export type ProductQuery = NonNullable<operations['listProducts']['parameters']['query']>;
-
-export async function listProducts(query: ProductQuery = {}, signal?: AbortSignal): Promise<Page<ProductSummary>> {
-  const client = createApiClient();
-  const { data, error, response } = await client.GET('/api/v1/products', {
-    params: { query },
-    signal,
-    cache: 'no-store',
-  });
-
-  if (!response.ok) {
-    if (error && typeof error === 'object') {
-      throw new ApiRequestError(parseApiError(error), response.status);
-    }
-    throw new Error('Không kết nối được máy chủ. Hãy thử lại sau.');
-  }
-  if (!data) throw new Error('Dữ liệu danh mục sản phẩm nhận về không hợp lệ.');
-  // The list response is keyed `products`, not `items`. A client that assumed `items`
-  // would silently show an empty catalogue rather than fail, so the key is explicit.
-  return pageOf<ProductSummary>(data as unknown as Record<string, unknown>, 'products');
-}
-
-export async function getProduct(productId: string, signal?: AbortSignal): Promise<ProductDetail> {
-  const client = createApiClient();
-  const { data, error, response } = await client.GET('/api/v1/products/{productId}', {
-    params: { path: { productId } },
-    signal,
-    cache: 'no-store',
-  });
-
-  if (!response.ok) {
-    if (error && typeof error === 'object') {
-      throw new ApiRequestError(parseApiError(error), response.status);
-    }
-    throw new Error('Không kết nối được máy chủ. Hãy thử lại sau.');
-  }
-  if (!data) throw new Error('Dữ liệu chi tiết sản phẩm nhận về không hợp lệ.');
-  return data;
-}
 
 export async function getChannelPrices(productId: string, signal?: AbortSignal): Promise<ChannelPriceCollection> {
   const response = await apiFetch(`/api/v1/products/${encodeURIComponent(productId)}/prices`, { signal, cache: 'no-store' });
@@ -90,7 +218,11 @@ export async function setChannelPrice(productId: string, channelId: string, vari
   return response.json() as Promise<ChannelVariantPrice>;
 }
 
-export async function listProductPublications(productId: string, signal?: AbortSignal): Promise<ProductPublicationCollection> {
+export type ProductMedia = components['schemas']['ProductMedia'];
+export type ProductMediaCollection = components['schemas']['ProductMediaCollection'];
+export type ProductMediaOrderInput = components['schemas']['ProductMediaOrderRequest'];
+
+export async function listProductPublications(productId: string, signal?: AbortSignal): Promise<components['schemas']['ProductPublicationCollection']> {
   const client = createApiClient();
   const { data, error, response } = await client.GET('/api/v1/products/{productId}/publications', {
     params: { path: { productId } }, signal, cache: 'no-store',
@@ -219,125 +351,90 @@ export async function deleteProductMedia(productId: string, mediaId: string, exp
   }));
 }
 
+// ---------------------------------------------------------------------------------------------
+// Catalogue writes served by Spring Boot.
+// ---------------------------------------------------------------------------------------------
+
 export async function createProduct(input: CreateProductInput, idempotencyKey: string, signal?: AbortSignal): Promise<ProductDetail> {
   const client = createApiClient();
-  const { data, error, response } = await client.POST('/api/v1/products', {
+  const { data, response } = await client.POST('/api/v1/products', {
     params: { header: { 'Idempotency-Key': idempotencyKey } },
     body: input,
     signal,
   });
-  if (!response.ok) {
-    if (error && typeof error === 'object') throw new ApiRequestError(parseApiError(error), response.status);
-    throw new Error(`Không kết nối được API (HTTP ${response.status}).`);
-  }
+  if (!response.ok) await responseApiError(response);
   if (!data) throw new Error('Phản hồi tạo sản phẩm không đúng định dạng.');
-  return data;
+  return toProduct(data);
 }
 
-export async function updateProductCatalog(productId: string, input: UpdateProductCatalogInput, idempotencyKey: string, signal?: AbortSignal): Promise<ProductDetail> {
+/** `PATCH /products/{id}` takes no `Idempotency-Key`; only the two create routes do. */
+export async function updateProductCatalog(productId: string, input: UpdateProductCatalogInput, signal?: AbortSignal): Promise<ProductDetail> {
   const client = createApiClient();
-  const { data, error, response } = await client.PATCH('/api/v1/products/{productId}/catalog', {
-    params: { path: { productId }, header: { 'Idempotency-Key': idempotencyKey } },
-    body: input,
+  const { data, response } = await client.PATCH('/api/v1/products/{id}', {
+    params: { path: { id: Number(productId) } },
+    body: {
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.category !== undefined ? { category: input.category } : {}),
+      ...(input.status !== undefined ? { status: UI_STATUS[input.status] } : {}),
+    },
     signal,
   });
-  if (!response.ok) {
-    if (error && typeof error === 'object') throw new ApiRequestError(parseApiError(error), response.status);
-    throw new Error('Không kết nối được máy chủ. Hãy thử lại sau.');
-  }
+  if (!response.ok) await responseApiError(response);
   if (!data) throw new Error('Dữ liệu cập nhật sản phẩm nhận về không hợp lệ.');
-  return data;
+  return toProduct(data);
 }
 
 export async function createProductVariant(productId: string, input: CreateProductVariantInput, idempotencyKey: string, signal?: AbortSignal): Promise<ProductVariant> {
   const client = createApiClient();
-  const { data, error, response } = await client.POST('/api/v1/products/{productId}/variants', {
-    params: { path: { productId }, header: { 'Idempotency-Key': idempotencyKey } },
+  const { data, response } = await client.POST('/api/v1/products/{id}/variants', {
+    params: { path: { id: Number(productId) }, header: { 'Idempotency-Key': idempotencyKey } },
     body: input,
     signal,
   });
-  if (!response.ok) {
-    if (error && typeof error === 'object') throw new ApiRequestError(parseApiError(error), response.status);
-    throw new Error('Không kết nối được máy chủ. Hãy thử lại sau.');
-  }
+  if (!response.ok) await responseApiError(response);
   if (!data) throw new Error('Phản hồi thêm biến thể không đúng định dạng.');
-  return data;
+  return toVariant(data);
 }
+
 /**
- * The lifecycle edge list, mirrored from the API's own description.
+ * The lifecycle edge list, mirrored from `ProductServiceImpl.ALLOWED_TRANSITIONS`.
  *
- * It is duplicated rather than imported from the generated schema because the server enforces
- * the edges with one conditional UPDATE and answers 409 on an illegal move. Mirroring it lets
- * the control refuse before the request instead of rendering an error after it — and the test
- * that keeps the two in step is the contract test in the API, not this comment.
+ * The server refuses an illegal move with 409, so mirroring the edges lets the control refuse
+ * before the request instead of rendering an error after it.
  */
 export const PRODUCT_TRANSITIONS: Readonly<Record<ProductStatus, readonly ProductStatus[]>> = {
-  draft: ['active'],
-  active: ['archived', 'out_of_stock'],
-  out_of_stock: ['active'],
-  archived: [],
+  draft: ['active', 'archived'],
+  active: ['archived'],
+  archived: ['draft'],
 };
 
-/**
- * Moves a product along its lifecycle. The only writer of products.is_active, which is what
- * makes a product unreservable — so this is the route that takes stock off the shelf.
- *
- * Disabled at APP_ENV=production on the server, and the caller is expected to surface that
- * rather than let the button fail on every press.
- */
-export async function transitionProduct(productId: string, status: ProductStatus, idempotencyKey: string, signal?: AbortSignal): Promise<ProductSummary> {
-  const client = createApiClient();
-  const { data, error, response } = await client.PATCH('/api/v1/products/{productId}', {
-    params: { path: { productId }, header: { 'Idempotency-Key': idempotencyKey } },
-    body: { status },
-    signal,
-  });
-  if (!response.ok) {
-    if (error && typeof error === 'object') throw new ApiRequestError(parseApiError(error), response.status);
-    throw new Error('Không kết nối được máy chủ. Hãy thử lại sau.');
-  }
-  if (!data) throw new Error('Dữ liệu cập nhật sản phẩm nhận về không hợp lệ.');
-  return data;
+export async function transitionProduct(productId: string, status: ProductStatus, signal?: AbortSignal): Promise<ProductDetail> {
+  return updateProductCatalog(productId, { status }, signal);
 }
 
-export type UpdateVariantInput = {
-  /** At least one field must be present. Omitted fields are left alone. */
-  sku?: string;
-  color?: string;
-  size?: string;
-  /** Omit to leave unchanged, null to clear, or a non-negative integer (zero is valid). */
-  price_minor?: number | null;
-  /** Current ProductDetail.product_version; required when price_minor is present. */
-  expected_product_version?: number;
-  is_active?: boolean;
-  /** Mandatory when `sku` changes — it is the field a human reads aloud at the till. */
-  reason?: string;
-};
-
 /**
- * The only writer of a variant's own attributes.
+ * Updates a variant's server-supported fields. Stock never moves here: it changes only through a
+ * receipt or a reasoned inventory adjustment, both of which write a ledger entry.
  *
- * It does not move stock, and the UI that calls it must not pretend otherwise: stock changes
- * only through the reservation engine or an adjustment, both of which write an outbox event in
- * the same transaction. A catalogue edit that changed on_hand would be a stock change with no
- * event, and the Sync Center would then describe a history that never happened.
- *
- * Deactivating a variant that has already been sold is refused with 409 by the API, because its
- * SKU stays on historical order lines. The caller surfaces that rather than retrying.
+ * `PATCH /products/{id}/variants/{variantId}` takes no `Idempotency-Key`.
  */
-export async function updateVariant(productId: string, variantId: string, input: UpdateVariantInput, idempotencyKey: string, signal?: AbortSignal): Promise<ProductVariant> {
+export async function updateVariant(productId: string, variantId: string, input: UpdateVariantInput, signal?: AbortSignal): Promise<ProductVariant> {
   const client = createApiClient();
-  const { data, error, response } = await client.PATCH('/api/v1/products/{productId}/variants/{variantId}', {
-    params: { path: { productId, variantId }, header: { 'Idempotency-Key': idempotencyKey } },
-    body: input,
+  const { data, response } = await client.PATCH('/api/v1/products/{id}/variants/{variantId}', {
+    params: { path: { id: Number(productId), variantId: Number(variantId) } },
+    body: {
+      ...(input.sku !== undefined ? { sku: input.sku } : {}),
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.priceMinor !== undefined ? { price: input.priceMinor } : {}),
+      ...(input.currency !== undefined ? { currency: input.currency } : {}),
+      ...(input.reason !== undefined ? { reason: input.reason } : {}),
+    },
     signal,
   });
-  if (!response.ok) {
-    if (error && typeof error === 'object') throw new ApiRequestError(parseApiError(error), response.status);
-    throw new Error('Không kết nối được máy chủ. Hãy thử lại sau.');
-  }
+  if (!response.ok) await responseApiError(response);
   if (!data) throw new Error('Dữ liệu cập nhật biến thể nhận về không hợp lệ.');
-  return data;
+  return toVariant(data);
 }
 
 export type ProductImportProblem = {
@@ -364,9 +461,8 @@ export type ProductImportResult = {
 /**
  * Imports catalogue rows from a CSV file. The body IS the file.
  *
- * `dryRun` defaults to TRUE and should be sent first: it resolves every line against the live
- * catalogue and reports what it would do, writing nothing. Committing first and inspecting
- * afterwards would leave the reviewer looking at a catalogue that already changed.
+ * This route belongs to the frozen legacy contract: Spring Boot does not serve it yet. The
+ * export/import panel surfaces the failure rather than falling back to fixtures.
  */
 export async function importProducts(file: string, dryRun: boolean, idempotencyKey?: string, signal?: AbortSignal): Promise<ProductImportResult> {
   const client = createApiClient();

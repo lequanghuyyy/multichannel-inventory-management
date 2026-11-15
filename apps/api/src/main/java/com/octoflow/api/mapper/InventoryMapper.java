@@ -26,10 +26,19 @@ public class InventoryMapper {
         Long version = balance != null ? balance.getVersion() : 0L;
         java.time.Instant updatedAt = balance != null ? balance.getUpdatedAt() : variant.getUpdatedAt();
 
+        String productName = variant.getProduct() != null ? variant.getProduct().getName() : "";
+        String variantTitle = variant.getTitle();
+        Long price = variant.getPrice();
+        String currency = variant.getCurrency() != null ? variant.getCurrency() : "VND";
+
         return new InventorySnapshotResponse(
                 variant.getSku(),
                 variant.getId(),
                 variant.getProduct() != null ? variant.getProduct().getId() : null,
+                productName,
+                variantTitle,
+                price,
+                currency,
                 onHand,
                 reserved,
                 safetyBuffer,

@@ -54,6 +54,26 @@ export function parseApiError(value: unknown): ApiError {
   return value.error as unknown as ApiError;
 }
 
+/**
+ * Reads the error body straight from the transport response.
+ *
+ * Spring Boot operations in the generated contract declare no error responses, which makes
+ * `openapi-fetch`'s `error` value `never`. The body is still there on the wire, so server-path
+ * adapters parse `response` instead of narrowing a value the type system says cannot exist.
+ */
+export async function responseApiError(response: Response, fallback = 'Không kết nối được máy chủ. Hãy thử lại sau.'): Promise<never> {
+  if (response.headers.get('content-type')?.includes('application/json')) {
+    try {
+      const body: unknown = await response.json();
+      throw new ApiRequestError(parseApiError(body), response.status);
+    } catch (error) {
+      if (error instanceof ApiRequestError) throw error;
+      throw new Error(fallback);
+    }
+  }
+  throw new Error(fallback);
+}
+
 export function presentApiError(error: unknown): ErrorPresentation {
   if (!(error instanceof ApiRequestError)) {
     return { title: 'Không thể tải dữ liệu', detail: 'Không thể kết nối đến máy chủ. Hãy kiểm tra mạng rồi thử lại.' };

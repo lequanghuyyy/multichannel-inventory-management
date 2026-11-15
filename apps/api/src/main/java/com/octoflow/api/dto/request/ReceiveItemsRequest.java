@@ -1,5 +1,7 @@
 package com.octoflow.api.dto.request;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -15,10 +17,13 @@ import java.util.List;
  * reuse its Idempotency-Key; a new key means a new independent receive batch.
  */
 public record ReceiveItemsRequest(
+        @JsonProperty("inspections")
         @NotEmpty(message = "Danh sách kiểm đếm không được để trống")
         @Size(max = 200, message = "Một lần nhận không được vượt quá 200 dòng")
         List<@Valid ItemInspection> inspections,
 
+        @JsonProperty("expected_receipt_version")
+        @JsonAlias({"expectedReceiptVersion", "expected_receipt_version"})
         Long expectedReceiptVersion
 ) {
     public ReceiveItemsRequest(List<ItemInspection> inspections) {
@@ -26,19 +31,27 @@ public record ReceiveItemsRequest(
     }
 
     public record ItemInspection(
+            @JsonProperty("item_id")
+            @JsonAlias({"itemId", "item_id"})
             @NotNull(message = "ID dòng phiếu nhập không được để trống")
             @Positive(message = "ID dòng phiếu nhập phải lớn hơn 0")
             Long itemId,
 
+            @JsonProperty("accepted_quantity")
+            @JsonAlias({"acceptedQty", "accepted_quantity", "acceptedQuantity"})
             @NotNull(message = "Số lượng đạt chuẩn không được để trống")
             @Min(value = 0, message = "Số lượng đạt chuẩn không được âm")
             @Max(value = 1_000_000, message = "Số lượng đạt chuẩn không được vượt quá 1.000.000")
             Integer acceptedQty,
 
+            @JsonProperty("rejected_quantity")
+            @JsonAlias({"rejectedQty", "rejected_quantity", "rejectedQuantity"})
             @Min(value = 0, message = "Số lượng lỗi không được âm")
             @Max(value = 1_000_000, message = "Số lượng lỗi không được vượt quá 1.000.000")
             Integer rejectedQty,
 
+            @JsonProperty("rejection_reason")
+            @JsonAlias({"rejectionReason", "rejection_reason"})
             @Size(max = 500, message = "Lý do từ chối không được vượt quá 500 ký tự")
             String rejectionReason
     ) {

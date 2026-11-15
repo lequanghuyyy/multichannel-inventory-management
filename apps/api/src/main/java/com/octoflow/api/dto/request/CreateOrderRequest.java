@@ -1,5 +1,7 @@
 package com.octoflow.api.dto.request;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.NotBlank;
@@ -18,29 +20,39 @@ import java.util.List;
  * enter through the internal ChannelOrderCommand boundary, never through this DTO.
  */
 public record CreateOrderRequest(
+        @JsonProperty("source")
+        @JsonAlias({"channel_code", "channelCode", "source"})
         @Schema(description = "Deprecated compatibility field. Only POS (or empty) is accepted.",
                 example = "POS")
         String source,
 
+        @JsonProperty("external_order_id")
+        @JsonAlias({"externalOrderId", "external_order_id", "external_id"})
         @Schema(description = "Must be empty. Marketplace identity is assigned by the internal connector boundary.",
                 example = "null")
         @Size(max = 128, message = "Mã đơn hàng bên ngoài không được vượt quá 128 ký tự")
         String externalOrderId,
 
+        @JsonProperty("items")
+        @JsonAlias({"lines", "items"})
         @NotEmpty(message = "Đơn hàng phải có ít nhất một sản phẩm")
         @Size(max = 200, message = "Một đơn hàng không được vượt quá 200 dòng")
         List<@Valid OrderItemRequest> items
 ) {
     public record OrderItemRequest(
+            @JsonProperty("sku")
             @NotBlank(message = "SKU không được để trống")
             @Size(max = 64, message = "SKU không được vượt quá 64 ký tự")
             String sku,
 
+            @JsonProperty("quantity")
             @NotNull(message = "Số lượng không được để trống")
             @Positive(message = "Số lượng phải lớn hơn 0")
             @Max(value = 1_000_000, message = "Số lượng mỗi dòng không được vượt quá 1.000.000")
             Integer quantity,
 
+            @JsonProperty("unit_price")
+            @JsonAlias({"unitPrice", "unit_price", "unit_price_minor", "unitPriceMinor"})
             @Schema(description = "Optional expected price. The server price is authoritative; a mismatch is rejected with PRICE_OR_STOCK_CHANGED.",
                     example = "1250000")
             @PositiveOrZero(message = "Đơn giá không được âm")

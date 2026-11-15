@@ -14,16 +14,14 @@ export function productExportCsv(rows: readonly ProductExportRecord[]): string {
   return `\uFEFF${header.join(',')}\r\n${lines.join('\r\n')}${lines.length ? '\r\n' : ''}`;
 }
 
-export async function walkProductExport(query: Omit<ProductQuery, 'cursor' | 'limit'> = {}, signal?: AbortSignal, load: typeof listProducts = listProducts): Promise<ProductSummary[]> {
-  const rows: ProductSummary[] = [];
-  const seen = new Set<string>();
-  let cursor: string | undefined;
-  do {
-    const page = await load({ limit: 100, ...(cursor ? { cursor } : {}), ...query }, signal);
-    for (const row of page.items) if (!seen.has(row.id)) { seen.add(row.id); rows.push(row); }
-    cursor = page.nextCursor ?? undefined;
-  } while (cursor);
-  return rows;
+/**
+ * `GET /api/v1/products` returns the full catalogue in one response, so there is no cursor to
+ * walk. The `load` seam stays injectable for tests that want to assert the query is passed
+ * through unchanged.
+ */
+export async function walkProductExport(query: ProductQuery = {}, signal?: AbortSignal, load: typeof listProducts = listProducts): Promise<ProductSummary[]> {
+  const page = await load(query, signal);
+  return page.items;
 }
 
 export function productRowsCsv(rows: readonly ProductApiRow[]): string {

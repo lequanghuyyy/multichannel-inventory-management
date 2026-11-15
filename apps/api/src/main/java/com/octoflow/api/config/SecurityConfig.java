@@ -47,6 +47,7 @@ public class SecurityConfig {
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         CookieCsrfTokenRepository tokenRepository = CookieCsrfTokenRepository.withHttpOnlyFalse();
         tokenRepository.setCookieCustomizer(cookie -> cookie.path("/").secure(cookieSecure).sameSite("Lax"));
+        tokenRepository.setHeaderName("X-CSRF-Token");
 
         http
             .cors(cors -> cors.configurationSource(corsConfigurationSource))

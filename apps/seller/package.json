@@ -16,7 +16,7 @@
     "test:e2e": "playwright test",
     "validate:contracts": "node ./scripts/validate-contracts.mjs",
     "api:generate": "node ./scripts/generate-openapi.mjs",
-    "api:check": "npm run api:generate && git diff --exit-code -- src/api/generated/openapi.ts",
+    "api:check": "npm run api:generate && git diff --exit-code -- src/api/generated/openapi.server.ts",
     "check:secrets": "node ./scripts/check-frontend-secrets.mjs",
     "mobile:sync": "npm run build && cap sync",
     "mobile:verify": "node ../../scripts/verify-mobile.mjs",
