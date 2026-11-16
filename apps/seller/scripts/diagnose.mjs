@@ -12,7 +12,7 @@ async function diagnose() {
   page.on('pageerror', err => pageErrors.push({ message: err.message, stack: err.stack }));
   page.on('requestfailed', req => failedRequests.push({ url: req.url(), failure: req.failure() }));
 
-  const response = await page.goto('http://127.0.0.1:5173/login', { waitUntil: 'networkidle', timeout: 15000 });
+  const response = await page.goto('http://127.0.0.1:5174/login', { waitUntil: 'networkidle', timeout: 15000 });
   console.log('Status:', response?.status());
 
   const url = page.url();

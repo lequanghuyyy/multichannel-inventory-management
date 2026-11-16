@@ -15,11 +15,11 @@ const testWorkers = Math.max(1, Math.min(4, availableParallelism() - 1));
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
-    port: 5173,
+    port: 5174,
     strictPort: true,
     proxy: {
-      '/health': 'http://127.0.0.1:8080',
-      '/api': 'http://127.0.0.1:8080',
+      '/health': 'http://127.0.0.1:8085',
+      '/api': 'http://127.0.0.1:8085',
     },
   },
   test: {

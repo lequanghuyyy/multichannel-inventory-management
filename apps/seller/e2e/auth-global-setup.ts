@@ -13,7 +13,7 @@ export default async function setupAuthenticatedBrowser() {
     throw new Error('E2E_AUTH_EMAIL and E2E_AUTH_PASSWORD are required for authenticated Playwright tests.');
   }
 
-  const baseURL = process.env.E2E_BASE_URL?.trim() || 'http://127.0.0.1:5173';
+  const baseURL = process.env.E2E_BASE_URL?.trim() || 'http://127.0.0.1:5174';
   const context = await request.newContext({
     baseURL,
     extraHTTPHeaders: { Origin: new URL(baseURL).origin },

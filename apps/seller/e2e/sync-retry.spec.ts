@@ -10,7 +10,7 @@ type Snapshot = {
 };
 
 test('admin retry shows the backend terminal result without changing the committed stock snapshot', async ({ page }, testInfo) => {
-  const baseURL = process.env.E2E_BASE_URL ?? 'http://127.0.0.1:5173';
+  const baseURL = process.env.E2E_BASE_URL ?? 'http://127.0.0.1:5174';
   const api: APIRequestContext = await request.newContext({
     baseURL,
     extraHTTPHeaders: { Origin: new URL(baseURL).origin },

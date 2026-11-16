@@ -13,10 +13,10 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   workers: 1,
   reporter: [['list'], ['html', { open: 'never' }]],
-  use: { baseURL: externalURL || 'http://127.0.0.1:5173', storageState: authStatePath, trace: 'retain-on-failure' },
+  use: { baseURL: externalURL || 'http://127.0.0.1:5174', storageState: authStatePath, trace: 'retain-on-failure' },
   webServer: externalURL ? undefined : {
     command: 'npm run dev',
-    url: 'http://127.0.0.1:5173',
+    url: 'http://127.0.0.1:5174',
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,
   },

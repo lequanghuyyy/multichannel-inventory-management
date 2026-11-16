@@ -34,7 +34,7 @@ export SPRING_PROFILES_ACTIVE=dev
 mvn -f apps/api/pom.xml spring-boot:run
 ```
 
-Mặc định local dùng database `octoflow` trên `localhost:5432` với user `octoflow`. Production phải cung cấp `DB_URL`, `DB_USER`, `DB_PASSWORD`, `COOKIE_SECURE=true` và `CORS_ALLOWED_ORIGINS` phù hợp; không bật profile `dev`.
+Mặc định local dùng database `octoflow` trên `localhost:5433` với user `octoflow`. Production phải cung cấp `DB_URL`, `DB_USER`, `DB_PASSWORD`, `COOKIE_SECURE=true` và `CORS_ALLOWED_ORIGINS` phù hợp; không bật profile `dev`.
 
 Tạo sản phẩm, điều chỉnh tồn, giữ/bán hàng, đơn hàng và phiếu nhập cần `Idempotency-Key`. Tạo sản phẩm luôn bắt đầu ở trạng thái nháp với tồn bằng 0; nhập tồn sau đó qua phiếu nhập hoặc điều chỉnh có lý do. Kết quả idempotency được giữ 24 giờ mặc định; thời hạn có thể cấu hình bằng `IDEMPOTENCY_TTL`.
 

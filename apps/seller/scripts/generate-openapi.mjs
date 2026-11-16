@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 // Canonical contract: exported from the running Spring Boot app with
-//   curl -s http://127.0.0.1:8080/api/v1/openapi.json -o apps/api/openapi.json
+//   curl -s http://127.0.0.1:8085/api/v1/openapi.json -o apps/api/openapi.json
 // (see apps/api/README or the phase-05 runbook). Never edit the generated output by hand.
 const here = dirname(fileURLToPath(import.meta.url));
 const input = resolve(here, '../../api/openapi.json');

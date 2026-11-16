@@ -150,7 +150,7 @@ test('mobile auth endpoints accept exactly Android/iOS origins, issue bearer not
     const revoked = await request.get('/api/v1/auth/session', { headers: authorized });
     expect(revoked.status()).toBe(401);
   }
-  for (const origin of ['http://127.0.0.1:5173', 'https://evil.example']) {
+  for (const origin of ['http://127.0.0.1:5174', 'https://evil.example']) {
     const result = await request.post('/api/v1/auth/mobile/login', { headers: { Origin: origin }, data: account });
     expect(result.status()).toBe(403);
   }

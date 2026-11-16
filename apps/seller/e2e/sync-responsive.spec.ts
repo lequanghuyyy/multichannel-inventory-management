@@ -19,7 +19,7 @@ async function createInventoryEvent(api: APIRequestContext, sku: string, key: st
 }
 
 test('sync reconnect and inventory render the committed API snapshot at desktop and mobile widths', async ({ page }, testInfo) => {
-  const baseURL = process.env.E2E_BASE_URL ?? 'http://127.0.0.1:5173';
+  const baseURL = process.env.E2E_BASE_URL ?? 'http://127.0.0.1:5174';
   const api = await request.newContext({
     baseURL,
     extraHTTPHeaders: { Origin: new URL(baseURL).origin },
