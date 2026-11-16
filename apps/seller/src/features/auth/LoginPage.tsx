@@ -30,7 +30,7 @@ export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
     }
   };
 
-  const message = error instanceof ApiRequestError && error.code === 'INVALID_CREDENTIALS'
+  const message = error instanceof ApiRequestError && ['INVALID_CREDENTIALS', 'UNAUTHORIZED'].includes(error.code)
     ? { title: 'Đăng nhập không thành công', detail: 'Thông tin đăng nhập không hợp lệ.' }
     : error ? presentApiError(error) : null;
 

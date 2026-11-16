@@ -18,7 +18,7 @@ export interface AuthContextValue {
 export const AuthContext = createContext<AuthContextValue | null>(null);
 
 function isCredentialInvalid(error: unknown): boolean {
-  return error instanceof ApiRequestError && ['UNAUTHENTICATED', 'SESSION_EXPIRED'].includes(error.code);
+  return error instanceof ApiRequestError && ['UNAUTHORIZED', 'UNAUTHENTICATED', 'SESSION_EXPIRED'].includes(error.code);
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
