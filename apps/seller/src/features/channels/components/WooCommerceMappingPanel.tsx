@@ -1,51 +1,177 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getWooCommerceMappingIssues, importWooCommerceMappings, previewWooCommerceMappings, refreshWooCommerceMappings, type WooCommerceMappingReport } from '../../../api/woocommerce';
+import {
+  listChannelMappings,
+  registerChannelMapping,
+  verifyChannelMapping,
+  type Channel,
+  type ChannelMapping,
+} from '../../../api/channels';
 import { Button } from '../../../components/ui/Button';
 import { Card } from '../../../components/ui/Card';
+import { Input } from '../../../components/ui/Input';
 import { EmptyState, ErrorState, LoadingState } from '../../../components/common/ScreenState';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 
-export function WooCommerceMappingPanel({ canManage, onUpdated }: { canManage: boolean; onUpdated: () => void }) {
-  const [issues, setIssues] = useState<Awaited<ReturnType<typeof getWooCommerceMappingIssues>>['issues']>([]);
-  const [report, setReport] = useState<WooCommerceMappingReport | null>(null);
+type Feedback = { tone: 'success' | 'danger' | 'warning'; text: string };
+
+const mappingTone: Record<ChannelMapping['mapping_status'], 'success' | 'neutral' | 'warning' | 'danger'> = {
+  verified: 'success',
+  unverified: 'neutral',
+  needs_attention: 'danger',
+  stale: 'warning',
+};
+
+const mappingLabel: Record<ChannelMapping['mapping_status'], string> = {
+  verified: 'Đã xác minh',
+  unverified: 'Chưa xác minh',
+  needs_attention: 'Cần xử lý',
+  stale: 'Cần xác minh lại',
+};
+
+export function WooCommerceMappingPanel({ channel, canManage, onUpdated }: { channel: Channel; canManage: boolean; onUpdated: () => void }) {
+  const [mappings, setMappings] = useState<ChannelMapping[]>([]);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [action, setAction] = useState<string>('');
-  const [lastAction, setLastAction] = useState<string>('');
+  const [busy, setBusy] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [form, setForm] = useState({ sku: '', external_listing_id: '', external_variant_id: '', external_sku: '' });
 
-  const refreshIssues = useCallback(async (signal?: AbortSignal) => {
-    try { const value = await getWooCommerceMappingIssues(signal); if (!signal?.aborted) setIssues(value.issues); }
-    catch (cause) { if (!signal?.aborted) setError(messageOf(cause)); }
-    finally { if (!signal?.aborted) setLoading(false); }
-  }, []);
+  const load = useCallback(async (signal?: AbortSignal) => {
+    setLoading(true); setError(null);
+    try {
+      const page = await listChannelMappings(channel.id, { limit: 100 }, signal);
+      if (!signal?.aborted) setMappings(page.items);
+    } catch (cause) {
+      if (!signal?.aborted) setError(messageOf(cause));
+    } finally {
+      if (!signal?.aborted) setLoading(false);
+    }
+  }, [channel.id]);
 
-  useEffect(() => { const controller = new AbortController(); void refreshIssues(controller.signal); return () => controller.abort(); }, [refreshIssues]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
+  }, [load]);
 
-  const run = async (label: string, operation: () => Promise<WooCommerceMappingReport>) => {
+  const register = async () => {
     if (!canManage || busy) return;
-    setBusy(true); setAction(label); setError(null);
-    try { setReport(await operation()); setLastAction(label); await refreshIssues(); if (label !== 'Preview') onUpdated(); }
-    catch (cause) { setError(messageOf(cause)); }
-    finally { setBusy(false); setAction(''); }
+    const input = {
+      sku: form.sku.trim(),
+      external_listing_id: form.external_listing_id.trim(),
+      external_variant_id: form.external_variant_id.trim() || undefined,
+      external_sku: form.external_sku.trim(),
+    };
+    if (!input.sku || !input.external_listing_id || !input.external_sku) {
+      setFeedback({ tone: 'danger', text: 'Cần nhập đủ SKU Core, product ID và SKU WooCommerce. Variation ID chỉ cần cho sản phẩm biến thể.' });
+      return;
+    }
+    if (!/^\d+$/.test(input.external_listing_id) || (input.external_variant_id && !/^\d+$/.test(input.external_variant_id))) {
+      setFeedback({ tone: 'danger', text: 'Product ID và variation ID phải là số nguyên dương.' });
+      return;
+    }
+    setBusy('register'); setFeedback(null);
+    try {
+      await registerChannelMapping(channel.id, input);
+      setFeedback({ tone: 'success', text: 'Đã đăng ký mapping. Mapping chưa được dùng để ghi tồn cho tới khi xác minh thành công.' });
+      setForm({ sku: '', external_listing_id: '', external_variant_id: '', external_sku: '' });
+      await load();
+      onUpdated();
+    } catch (cause) {
+      setFeedback({ tone: 'danger', text: messageOf(cause) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const verify = async (mapping: ChannelMapping) => {
+    if (!canManage || busy) return;
+    setBusy(mapping.id); setFeedback(null);
+    try {
+      const verified = await verifyChannelMapping(channel.id, mapping.id);
+      setFeedback(verified.mapping_status === 'verified'
+        ? { tone: 'success', text: `Đã xác minh ${mapping.external_sku}: sản phẩm tồn tại, ID/SKU khớp và WooCommerce đang quản lý tồn kho.` }
+        : { tone: 'warning', text: `Backend trả trạng thái ${verified.mapping_status}. Mapping chưa đủ điều kiện ghi tồn kho.` });
+      await load();
+      onUpdated();
+    } catch (cause) {
+      setFeedback({ tone: 'danger', text: messageOf(cause) });
+    } finally {
+      setBusy(null);
+    }
   };
 
   return <div className="grid min-w-0 gap-4">
-    <Card className="grid min-w-0 gap-3 p-5">
-      <header><p className="font-body text-caption font-semibold uppercase tracking-[0.13em] text-graphite">WooCommerce catalog</p><h2 className="mt-1 font-display text-lg font-bold text-on-surface">Preview và mapping theo SKU</h2><p className="mt-1 max-w-3xl text-sm leading-6 text-graphite">Ghép exact SKU với product hoặc variation ID. Không ghép theo tên sản phẩm; conflict không tự ghi đè mapping đang lưu.</p></header>
-      {canManage ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" loading={busy && action === 'Preview'} disabled={busy} onClick={() => void run('Preview', previewWooCommerceMappings)}>Preview</Button><Button size="sm" loading={busy && action === 'Import'} disabled={busy} onClick={() => void run('Import', importWooCommerceMappings)}>Import mappings</Button><Button size="sm" variant="ghost" loading={busy && action === 'Refresh'} disabled={busy} onClick={() => void run('Refresh', refreshWooCommerceMappings)}>Refresh mappings</Button></div> : <p className="text-xs leading-5 text-graphite">STAFF chỉ xem. ADMIN mới có thể preview, import hoặc refresh mapping.</p>}
-      {loading ? <LoadingState label="Đang tải mapping issues…" /> : null}
-      {error ? <ErrorState error={error} retry={() => void refreshIssues()} /> : null}
-      {report ? <section className="grid gap-3 rounded-control border border-outline-variant/50 p-3" aria-live="polite"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-body text-sm font-semibold text-on-surface">Kết quả {lastAction || 'mapping'}</h3><StatusBadge tone={report.conflicts || report.unmapped || report.stale ? 'warning' : 'success'}>{report.mapped} đã map</StatusBadge></div><dl className="grid grid-cols-2 gap-3 sm:grid-cols-4"><Metric label="Products" value={report.remote_products} /><Metric label="SKU rows" value={report.remote_listings} /><Metric label="Có thể map" value={report.would_map} /><Metric label="Xung đột / chưa ghép / stale" value={`${report.conflicts} / ${report.unmapped} / ${report.stale}`} /></dl>{report.issues.length ? <ul className="grid gap-2">{report.issues.slice(0, 8).map((issue, index) => <li key={`${issue.external_variant_id}-${index}`} className="rounded-control bg-surface-container-low p-3"><code className="break-all font-mono text-xs text-on-surface">{issue.sku || 'SKU trống'}</code><p className="mt-1 text-xs text-error">{issue.reason}</p><p className="mt-1 break-all text-caption text-graphite">Product {issue.external_product_id} · variant {issue.external_variant_id}</p></li>)}</ul> : null}</section> : null}
+    <Card className="grid min-w-0 gap-4 p-5">
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="font-body text-caption font-semibold uppercase tracking-[0.13em] text-graphite">Mapping WooCommerce</p>
+          <h2 className="mt-1 font-display text-lg font-bold text-on-surface">Đăng ký và xác minh SKU</h2>
+          <p className="mt-1 max-w-3xl text-sm leading-6 text-graphite">Product ID là sản phẩm cha; variation ID là biến thể. Với sản phẩm đơn giản, để trống variation ID. Mapping chỉ được dùng để ghi tồn sau khi backend đọc lại đúng ID, đúng SKU và thấy WooCommerce đang quản lý tồn kho.</p>
+        </div>
+        <StatusBadge tone={mappings.every((item) => item.mapping_status === 'verified') && mappings.length > 0 ? 'success' : 'warning'}>
+          {mappings.filter((item) => item.mapping_status === 'verified').length} / {mappings.length} đã xác minh
+        </StatusBadge>
+      </header>
+
+      {canManage ? <form className="grid gap-3 rounded-control border border-outline-variant/50 p-4 md:grid-cols-2 xl:grid-cols-4" onSubmit={(event) => { event.preventDefault(); void register(); }}>
+        <Input label="SKU Core" value={form.sku} onChange={(event) => setForm({ ...form, sku: event.target.value })} placeholder="SHOE-001-BLK-42" autoComplete="off" />
+        <Input label="Product ID" value={form.external_listing_id} onChange={(event) => setForm({ ...form, external_listing_id: event.target.value })} placeholder="123" inputMode="numeric" autoComplete="off" />
+        <Input label="Variation ID" value={form.external_variant_id} onChange={(event) => setForm({ ...form, external_variant_id: event.target.value })} placeholder="456" inputMode="numeric" autoComplete="off" hint="Sản phẩm đơn giản: để trống." />
+        <Input label="SKU trên WooCommerce" value={form.external_sku} onChange={(event) => setForm({ ...form, external_sku: event.target.value })} placeholder="SHOE-001-BLK-42" autoComplete="off" />
+        <div className="flex items-end md:col-span-2 xl:col-span-4">
+          <Button type="submit" size="sm" loading={busy === 'register'} disabled={Boolean(busy)}>Đăng ký mapping</Button>
+        </div>
+      </form> : <p className="text-xs leading-5 text-graphite">STAFF chỉ xem. ADMIN mới có thể đăng ký hoặc xác minh mapping.</p>}
+
+      {feedback ? <p role="status" className={`rounded-control p-3 text-sm ${feedback.tone === 'success' ? 'bg-badge-progress-bg text-badge-progress-text' : feedback.tone === 'warning' ? 'bg-surface-container-low text-on-surface' : 'bg-error-container/40 text-error'}`}>{feedback.text}</p> : null}
+      {loading ? <LoadingState label="Đang tải mapping WooCommerce…" /> : null}
+      {!loading && error ? <ErrorState error={error} retry={() => void load()} /> : null}
+      {!loading && !error && mappings.length === 0 ? <EmptyState title="Chưa có mapping WooCommerce" detail="Đăng ký product/variation ID và SKU WooCommerce, sau đó xác minh qua connector." /> : null}
     </Card>
 
-    <Card className="grid min-w-0 gap-3 p-5"><header className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-display text-base font-bold text-on-surface">Mapping issues gần nhất</h3><p className="mt-1 text-caption text-graphite">Phát hiện SKU thiếu/trùng, listing không hoạt động, stock tracking hoặc mapping stale.</p></div><StatusBadge tone={issues.length ? 'warning' : 'success'}>{issues.length} issue</StatusBadge></header>
-      {!loading && !issues.length ? <EmptyState title="Không có mapping issue đã ghi nhận" detail="Refresh mapping để kiểm tra lại danh mục WooCommerce hiện tại." /> : null}
-      {issues.length ? <ul className="grid gap-2 sm:grid-cols-2">{issues.map((issue) => <li key={issue.external_variant_id} className="min-w-0 rounded-control bg-surface-container-low p-3"><div className="flex items-start justify-between gap-2"><code className="break-all font-mono text-xs font-semibold text-on-surface">{issue.sku || 'SKU trống'}</code><StatusBadge tone={issue.reason.includes('conflict') || issue.reason.includes('duplicate') ? 'danger' : 'warning'}>{issue.reason}</StatusBadge></div><p className="mt-2 break-words text-xs text-graphite">{issue.product_title || 'WooCommerce product'} · product {issue.external_product_id}</p><p className="mt-1 break-all text-caption text-graphite">Variation identity: {issue.external_variant_id}</p><time className="mt-2 block text-caption text-graphite">Ghi nhận {formatTime(issue.last_seen_at)}</time></li>)}</ul> : null}
-    </Card>
+    {mappings.length > 0 ? <Card className="min-w-0 overflow-hidden p-0">
+      <header className="border-b border-outline-variant/50 px-5 py-4"><h3 className="font-display text-base font-bold text-on-surface">Mapping và số lượng</h3><p className="mt-1 text-caption text-graphite">Mục tiêu là quota tuyệt đối gửi sang WooCommerce. Đã xác nhận là phản hồi HTTP; chỉ số đọc lại mới quyết định trạng thái VERIFIED.</p></header>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[980px] border-collapse text-left">
+          <caption className="sr-only">Mapping SKU WooCommerce và số lượng tồn kho</caption>
+          <thead><tr className="h-11 border-b border-outline-variant/50 bg-surface-container-low font-body text-caption font-semibold uppercase tracking-wider text-graphite">
+            <th className="px-5">SKU WooCommerce</th><th className="px-3">SKU Core</th><th className="px-3">Product / Variation</th><th className="px-3">Mapping</th>
+            <th className="px-3 text-right">Mục tiêu</th><th className="px-3 text-right">Đã gửi</th><th className="px-3 text-right">Đã xác nhận</th><th className="px-3 text-right">Đọc lại</th><th className="px-5 text-right">Thao tác</th>
+          </tr></thead>
+          <tbody className="divide-y divide-surface-container">
+            {mappings.map((mapping) => <tr key={mapping.id} className="font-body text-body-sm">
+              <td className="px-5 py-3"><code className="font-mono text-on-surface">{mapping.external_sku}</code>{mapping.issue_reason ? <code className="mt-1 block break-all font-mono text-[10px] text-error">{mapping.issue_reason}</code> : null}</td>
+              <td className="px-3 py-3"><code className="font-mono text-on-surface-variant">{mapping.canonical_sku}</code>{!mapping.variant_is_active ? <span className="mt-1 block text-[10px] uppercase text-graphite">ngừng bán</span> : null}</td>
+              <td className="px-3 py-3"><code className="block font-mono text-caption text-on-surface">{mapping.external_product_id || '—'}</code><code className="mt-1 block font-mono text-caption text-graphite">{mapping.external_variant_id || '—'}</code></td>
+              <td className="px-3 py-3"><StatusBadge tone={mappingTone[mapping.mapping_status]}>{mappingLabel[mapping.mapping_status]}</StatusBadge>{mapping.last_verified_at ? <span className="mt-1 block text-[10px] text-graphite">{formatTime(mapping.last_verified_at)}</span> : null}</td>
+              <td className="px-3 py-3 text-right tabular-nums text-on-surface-variant">{number(mapping.target_quantity)}</td>
+              <td className="px-3 py-3 text-right tabular-nums text-on-surface-variant">{number(mapping.pushed_quantity)}</td>
+              <td className="px-3 py-3 text-right tabular-nums text-on-surface-variant">{number(mapping.acknowledged_quantity)}</td>
+              <td className="px-3 py-3 text-right"><span className={mapping.latest_sync_status === 'MISMATCH' ? 'font-semibold text-error' : 'tabular-nums text-on-surface-variant'}>{number(mapping.verified_quantity ?? mapping.latest_sync_remote_after)}</span></td>
+              <td className="px-5 py-3 text-right">{canManage ? <Button variant="secondary" size="sm" loading={busy === mapping.id} disabled={Boolean(busy)} onClick={() => void verify(mapping)}>{mapping.mapping_status === 'verified' ? 'Xác minh lại' : 'Xác minh'}</Button> : <span className="text-caption text-graphite">Chỉ ADMIN</span>}</td>
+            </tr>)}
+          </tbody>
+        </table>
+      </div>
+    </Card> : null}
   </div>;
 }
 
-function Metric({ label, value }: { label: string; value: number | string }) { return <div className="rounded-control bg-surface-container-low p-3"><span className="text-caption text-graphite">{label}</span><strong className="mt-1 block break-words font-display text-base tabular-nums text-on-surface">{value}</strong></div>; }
-function formatTime(value?: string): string { if (!value) return '—'; const date = new Date(value); return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', dateStyle: 'medium', timeStyle: 'short' }); }
-function messageOf(error: unknown): string { return error instanceof Error ? error.message : 'Không thể cập nhật mapping WooCommerce.'; }
+function number(value?: number | null): string {
+  return value === null || value === undefined ? '—' : value.toLocaleString('vi-VN');
+}
+
+function formatTime(value?: string | null): string {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function messageOf(error: unknown): string {
+  if (error instanceof Error) {
+    const code = (error as { code?: string }).code;
+    return code ? `${error.message} (${code})` : error.message;
+  }
+  return 'Không thể cập nhật mapping WooCommerce.';
+}

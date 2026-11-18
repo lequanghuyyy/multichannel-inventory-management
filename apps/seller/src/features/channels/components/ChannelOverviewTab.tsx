@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { getChannelAPICapabilities, type Channel, type ChannelMapping, type ChannelMappingIssue, type ShopifyCapabilityEvidence, type ShopifyCapabilityReport } from '../../../api/channels';
 import type { ShopifyStatus } from '../../../api/shopify';
-import { getWooCommerceStatus, getWooCommerceWebhookHealth, type WooCommerceStatus, type WooCommerceWebhookHealth } from '../../../api/woocommerce';
+import { getWooCommerceChannelStatus, type WooCommerceChannelStatus } from '../../../api/woocommerce';
 import { getEbayCapabilities, getEbayOperationalStatus, getEbayStatus, type EbayCapability, type EbayOperationalStatus, type EbayStatus } from '../../../api/ebay';
 import { Card } from '../../../components/ui/Card';
 import { StatusBadge } from '../../../components/common/StatusBadge';
@@ -174,46 +174,57 @@ function EbayChannelOverview({ channel, issues, issueCount, onNavigate }: {
 }
 
 function WooCommerceChannelOverview({ channel, onNavigate }: { channel: Channel; onNavigate: (tab: ChannelWorkspaceTab) => void }) {
-  const [status, setStatus] = useState<WooCommerceStatus | null>(null);
-  const [health, setHealth] = useState<WooCommerceWebhookHealth | null>(null);
+  const [status, setStatus] = useState<WooCommerceChannelStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true); setError(null);
-    void getWooCommerceStatus(controller.signal).then(async (value) => {
-      if (controller.signal.aborted) return;
-      setStatus(value);
-      if (value.channel_id === channel.id) {
-        try { setHealth(await getWooCommerceWebhookHealth(channel.id, controller.signal)); }
-        catch { if (!controller.signal.aborted) setHealth(null); }
-      }
-    }).catch((cause: unknown) => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Không đọc được trạng thái WooCommerce.'); })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    void getWooCommerceChannelStatus(channel.id, controller.signal).then((value) => {
+      if (!controller.signal.aborted) setStatus(value);
+    }).catch((cause: unknown) => {
+      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Không đọc được trạng thái WooCommerce.');
+    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [channel.id]);
 
-  const connected = status?.connected && status.channel_id === channel.id;
+  const verified = status?.connection_verified === true;
   const issues = [
-    ...(status && !status.currency_compatible ? [{ label: `Tiền tệ Core (${status.core_currency ?? '—'}) khác WooCommerce (${status.currency ?? '—'}).`, tab: 'settings' as const }] : []),
-    ...(health && !health.active && !health.polling_enabled ? [{ label: 'Webhook và polling fallback đều chưa hoạt động.', tab: 'settings' as const }] : []),
-    ...(health?.poll_error_code ? [{ label: `Order recovery báo ${health.poll_error_code}.`, tab: 'history' as const }] : []),
+    ...(status && !verified ? [{ label: 'Kết nối WooCommerce chưa được xác minh qua REST API. Tồn kho sẽ không được ghi cho tới khi xác minh thành công.', tab: 'settings' as const }] : []),
+    ...(status && status.inventory_write_enabled && !status.inventory_write_available ? [{ label: 'Cờ ghi tồn kho đang bật nhưng connector chưa sẵn sàng ghi. Kiểm tra credentials, môi trường và kết nối.', tab: 'settings' as const }] : []),
+    ...(status && (status.verified_mapping_count ?? 0) < (status.mapping_count ?? 0) ? [{ label: `${(status.mapping_count ?? 0) - (status.verified_mapping_count ?? 0)} mapping chưa được xác minh nên đang bị chặn ghi tồn.`, tab: 'products' as const }] : []),
+    ...(status && (status.drift_count ?? 0) > 0 ? [{ label: `${status.drift_count ?? 0} listing đang lệch số lượng đã xác minh.`, tab: 'inventory' as const }] : []),
+    ...(status?.last_error_code ? [{ label: `Lỗi connector gần nhất: ${status.last_error_code}.`, tab: 'settings' as const }] : []),
   ];
 
   return <div className="grid min-w-0 gap-4">
     {loading ? <LoadingState label="Đang đọc trạng thái WooCommerce…" /> : null}
     {error ? <Card className="p-4"><p role="status" className="text-sm text-error">{error}</p></Card> : null}
     <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(19rem,0.8fr)]">
-      <Card className="grid min-w-0 gap-4 p-5"><header className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-body text-caption font-semibold uppercase tracking-[0.13em] text-graphite">Website bên thứ ba</p><h2 className="mt-1 break-words font-display text-lg font-bold text-on-surface">{status?.store_name || channel.name}</h2><p className="mt-1 break-all text-xs text-graphite">{status?.store_origin || 'Store URL chưa được verify'}</p></div><StatusBadge tone={connected ? 'success' : status?.connection_status === 'error' ? 'danger' : 'neutral'}>{connected ? 'Kết nối đã xác minh' : status?.connection_status === 'error' ? 'Có lỗi' : 'Chưa kết nối'}</StatusBadge></header>
-        <dl className="grid gap-3 border-t border-outline-variant/50 pt-4 sm:grid-cols-2"><Fact label="Nền tảng" value="WooCommerce · self-hosted website" /><Fact label="Môi trường" value="Development store · không phải marketplace sandbox" /><Fact label="REST API" value={connected ? `WooCommerce ${status?.wc_version ?? '—'} · ${status?.currency ?? '—'}` : status?.enabled ? 'Connector bật · chưa verified' : 'Connector disabled'} /><Fact label="Xác minh gần nhất" value={formatTime(status?.last_verified_at)} /></dl>
+      <Card className="grid min-w-0 gap-4 p-5">
+        <header className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-body text-caption font-semibold uppercase tracking-[0.13em] text-graphite">Website bên thứ ba</p><h2 className="mt-1 break-words font-display text-lg font-bold text-on-surface">{status?.store_name || channel.name}</h2><p className="mt-1 break-all text-xs text-graphite">{status?.store_url || 'Store URL chưa được xác minh'}</p></div><StatusBadge tone={verified ? 'success' : status?.connection_status === 'error' ? 'danger' : 'neutral'}>{verified ? 'Kết nối đã xác minh' : status?.connection_status === 'error' ? 'Có lỗi' : 'Chưa xác minh'}</StatusBadge></header>
+        <dl className="grid gap-3 border-t border-outline-variant/50 pt-4 sm:grid-cols-2">
+          <Fact label="Nền tảng" value="WooCommerce · self-hosted website" />
+          <Fact label="Môi trường" value={status?.environment || channel.environment || '—'} />
+          <Fact label="REST API" value={verified ? `WooCommerce ${status?.wc_version ?? '—'} · ${status?.currency ?? '—'}` : status?.connector_enabled ? 'Connector bật · chưa xác minh' : 'Connector đang tắt'} />
+          <Fact label="Xác minh gần nhất" value={formatTime(status?.connection_verified_at)} />
+        </dl>
       </Card>
-      <Card className="grid content-start gap-4 p-5"><header><p className="font-body text-caption font-semibold uppercase tracking-[0.13em] text-graphite">Order ingest</p><h2 className="mt-1 font-display text-lg font-bold text-on-surface">Webhook và polling recovery</h2></header>
-        <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1"><Fact label="Webhook" value={health?.active ? 'Hai topic order đang active' : health?.status ?? 'Chưa xác minh'} /><Fact label="Polling fallback" value={health?.polling_enabled ? `Bật · lần gần nhất ${formatTime(health.last_poll_at)}` : 'Tắt'} /><Fact label="Đơn nhận thành công gần nhất" value={formatTime(health?.last_successful_at)} /><Fact label="Receipts retry / dead" value={health ? `${health.failed_receipts} / ${health.dead_receipts}` : '—'} /></dl>
+      <Card className="grid content-start gap-4 p-5">
+        <header><p className="font-body text-caption font-semibold uppercase tracking-[0.13em] text-graphite">Quyền ghi tồn kho</p><h2 className="mt-1 font-display text-lg font-bold text-on-surface">Đọc, ghi và xác minh</h2></header>
+        <div className="grid grid-cols-2 gap-3">
+          <Metric label="Mapping đã xác minh" value={`${(status?.verified_mapping_count ?? 0).toLocaleString('vi-VN')} / ${(status?.mapping_count ?? 0).toLocaleString('vi-VN')}`} />
+          <Metric label="Listing lệch" value={(status?.drift_count ?? 0).toLocaleString('vi-VN')} />
+          <Metric label="Đọc / xác minh" value={status?.read_available ? 'Sẵn sàng' : 'Bị chặn'} />
+          <Metric label="Ghi tồn kho" value={status?.inventory_write_available ? 'Sẵn sàng' : status?.inventory_write_enabled ? 'Chưa sẵn sàng' : 'Đang tắt'} />
+        </div>
+        <p className="text-xs leading-5 text-graphite">Kết nối thành công không cấp quyền ghi. Mỗi lần ghi cần mapping đã xác minh, đúng SKU và WooCommerce đang quản lý tồn kho.</p>
       </Card>
     </div>
-    <Card className="grid min-w-0 gap-3 p-5"><header className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-body text-caption font-semibold uppercase tracking-[0.13em] text-graphite">Cần chú ý</p><h2 className="mt-1 font-display text-lg font-bold text-on-surface">Recovery và mapping</h2></div><StatusBadge tone={issues.length ? 'warning' : 'success'}>{issues.length ? `${issues.length} cảnh báo` : 'Không có cảnh báo kết nối'}</StatusBadge></header>
-      {issues.length ? <ul className="grid gap-2">{issues.map((issue,index)=><li key={`${issue.tab}-${index}`} className="flex min-w-0 flex-col justify-between gap-2 rounded-control bg-surface-container-low p-3 sm:flex-row sm:items-center"><p className="break-words text-sm text-on-surface">{issue.label}</p><Button variant="ghost" size="sm" onClick={()=>onNavigate(issue.tab)} className="self-start sm:self-auto">Mở chi tiết</Button></li>)}</ul> : <p className="text-sm text-graphite">Không có cảnh báo kết nối hoặc recovery đã ghi nhận.</p>}
-      <p className="text-xs leading-5 text-graphite">Nếu webhook bị tắt, recovery poller vẫn có thể phát hiện đơn nhưng có độ trễ theo chu kỳ cấu hình.</p>
+    <Card className="grid min-w-0 gap-3 p-5">
+      <header className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-body text-caption font-semibold uppercase tracking-[0.13em] text-graphite">Phạm vi Phase 06</p><h2 className="mt-1 font-display text-lg font-bold text-on-surface">Đồng bộ tồn kho và bằng chứng</h2></div><StatusBadge tone={issues.length ? 'warning' : 'success'}>{issues.length ? `${issues.length} cảnh báo` : 'Không có cảnh báo'}</StatusBadge></header>
+      {issues.length ? <ul className="grid gap-2">{issues.map((issue, index) => <li key={`${issue.tab}-${index}`} className="flex min-w-0 flex-col justify-between gap-2 rounded-control bg-surface-container-low p-3 sm:flex-row sm:items-center"><p className="break-words text-sm text-on-surface">{issue.label}</p><Button variant="ghost" size="sm" onClick={() => onNavigate(issue.tab)} className="self-start sm:self-auto">Mở chi tiết</Button></li>)}</ul> : <p className="text-sm text-graphite">Backend chưa ghi nhận cảnh báo kết nối hoặc mapping cho kênh này.</p>}
+      <p className="text-xs leading-5 text-graphite">Chưa hỗ trợ nhập đơn hàng, webhook và tạo/đăng bán sản phẩm. Vì vậy OctoFlow chưa thể giảm tồn kho khi có đơn trên WooCommerce; nguy cơ bán quá tồn vẫn còn cho tới khi order ingestion được triển khai.</p>
     </Card>
   </div>;
 }

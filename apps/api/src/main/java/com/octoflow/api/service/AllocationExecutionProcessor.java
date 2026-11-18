@@ -1,6 +1,7 @@
 package com.octoflow.api.service;
 
 import com.octoflow.api.adapter.ChannelAdapterException;
+import com.octoflow.api.adapter.ChannelAdapterRouter;
 import com.octoflow.api.entity.AllocationPlan;
 import com.octoflow.api.entity.AllocationPlanItem;
 import com.octoflow.api.entity.Channel;
@@ -41,6 +42,7 @@ public class AllocationExecutionProcessor {
     private final InventoryBalanceRepository balanceRepository;
     private final VariantAllocationStateRepository stateRepository;
     private final ChannelDeliveryEligibility eligibility;
+    private final ChannelAdapterRouter adapterRouter;
     private final ChannelEvidenceRecorder evidenceRecorder;
     private final SyncEventBroadcaster broadcaster;
     private final String workerId;
@@ -55,6 +57,7 @@ public class AllocationExecutionProcessor {
                                         InventoryBalanceRepository balanceRepository,
                                         VariantAllocationStateRepository stateRepository,
                                         ChannelDeliveryEligibility eligibility,
+                                        ChannelAdapterRouter adapterRouter,
                                         ChannelEvidenceRecorder evidenceRecorder,
                                         SyncEventBroadcaster broadcaster,
                                         @Value("${app.sync.allocation-max-attempts:5}") int maxAttempts,
@@ -67,6 +70,7 @@ public class AllocationExecutionProcessor {
         this.balanceRepository = balanceRepository;
         this.stateRepository = stateRepository;
         this.eligibility = eligibility;
+        this.adapterRouter = adapterRouter;
         this.evidenceRecorder = evidenceRecorder;
         this.broadcaster = broadcaster;
         this.workerId = "allocation-" + UUID.randomUUID();
@@ -267,7 +271,7 @@ public class AllocationExecutionProcessor {
         }
         if (mappingChanged(action, listing)) {
             evidenceRecorder.record(listing.getId(), null, plan.getId(), item.getId(),
-                    "ALLOCATION_" + item.getDirection().name(), "simulator", "UNCONFIRMED",
+                    "ALLOCATION_" + item.getDirection().name(), adapterName(action.channel()), "UNCONFIRMED",
                     item.getProposedQuota(), sent, acknowledged, verified, remoteBefore, verified,
                     "MAPPING_CHANGED_DURING_WRITE",
                     "Mapping identity changed while the allocation step was running.", action.idempotencyReference());
@@ -308,7 +312,7 @@ public class AllocationExecutionProcessor {
                 plan.getId(),
                 item.getId(),
                 "ALLOCATION_" + item.getDirection().name(),
-                "simulator",
+                adapterName(action.channel()),
                 "VERIFIED",
                 item.getProposedQuota(),
                 sent,
@@ -346,7 +350,8 @@ public class AllocationExecutionProcessor {
     }
 
     @Transactional
-    public void applyFailure(PlanAction action, ChannelAdapterException.Kind kind, String message) {
+    public void applyFailure(PlanAction action, ChannelAdapterException.Kind kind,
+                             String errorCode, String message) {
         AllocationPlan plan = planRepository.findByIdForUpdate(action.planId()).orElse(null);
         if (!ownedAndApplying(plan, new PlanClaim(action.planId(), action.claimGeneration()))) {
             return;
@@ -376,7 +381,7 @@ public class AllocationExecutionProcessor {
                 plan.getId(),
                 item.getId(),
                 "ALLOCATION_" + item.getDirection().name(),
-                "simulator",
+                adapterName(action.channel()),
                 evidenceStatus,
                 item.getProposedQuota(),
                 item.getSentQuantity(),
@@ -384,7 +389,7 @@ public class AllocationExecutionProcessor {
                 item.getVerifiedQuantity(),
                 item.getRemoteBefore(),
                 item.getRemoteAfter(),
-                kind.name(),
+                errorCode,
                 safeMessage,
                 action.idempotencyReference());
 
@@ -470,7 +475,7 @@ public class AllocationExecutionProcessor {
             item.setNextAttemptAt(null);
             itemRepository.save(item);
             evidenceRecorder.record(item.getListingId(), null, plan.getId(), item.getId(),
-                    "ALLOCATION_INCREASE", "simulator", "ERROR", item.getProposedQuota(),
+                    "ALLOCATION_INCREASE", adapterName(item.getListingId()), "ERROR", item.getProposedQuota(),
                     item.getSentQuantity(), item.getAcknowledgedQuantity(), item.getVerifiedQuantity(),
                     item.getRemoteBefore(), item.getRemoteAfter(), errorCode, reason, null);
         }
@@ -531,7 +536,7 @@ public class AllocationExecutionProcessor {
                 plan.getId(),
                 item.getId(),
                 "ALLOCATION_" + item.getDirection().name(),
-                "simulator",
+                adapterName(item.getListingId()),
                 "ERROR",
                 item.getProposedQuota(),
                 item.getSentQuantity(),
@@ -549,6 +554,18 @@ public class AllocationExecutionProcessor {
         planRepository.releaseLease(plan.getId(), workerId, claim.claimGeneration());
     }
 
+    /** Evidence label for the connector even when the write is blocked before routing. */
+    private String adapterName(Channel channel) {
+        return channel == null ? "none" : adapterRouter.adapterName(channel);
+    }
+
+    private String adapterName(Long listingId) {
+        ChannelListing listing = listingId == null ? null
+                : listingRepository.findById(listingId).orElse(null);
+        return listing == null || listing.getChannel() == null
+                ? "none" : adapterRouter.adapterName(listing.getChannel());
+    }
+
     private Channel snapshotChannel(Channel channel) {
         Channel copy = new Channel();
         copy.setId(channel.getId());
@@ -556,6 +573,13 @@ public class AllocationExecutionProcessor {
         copy.setName(channel.getName());
         copy.setEnvironment(channel.getEnvironment());
         copy.setStatus(channel.getStatus());
+        // Adapter I/O runs outside this transaction, so the snapshot must carry the same
+        // connection proof that eligibility saw. Without it every real connector is blocked.
+        copy.setConnectorName(channel.getConnectorName());
+        copy.setConnectorVersion(channel.getConnectorVersion());
+        copy.setConnectionVerifiedAt(channel.getConnectionVerifiedAt());
+        copy.setConnectionProductsRead(channel.isConnectionProductsRead());
+        copy.setConnectionAuthMode(channel.getConnectionAuthMode());
         return copy;
     }
 

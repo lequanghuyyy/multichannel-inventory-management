@@ -3,10 +3,12 @@ package com.octoflow.api.service;
 import com.octoflow.api.adapter.ChannelAdapterException;
 import com.octoflow.api.adapter.ChannelAdapterRouter;
 import com.octoflow.api.adapter.ChannelInventoryAdapter;
+import com.octoflow.api.entity.AllocationPlan;
 import com.octoflow.api.entity.Channel;
 import com.octoflow.api.entity.ChannelListing;
 import com.octoflow.api.entity.ProductVariant;
 import com.octoflow.api.entity.SyncJob;
+import com.octoflow.api.repository.AllocationPlanItemRepository;
 import com.octoflow.api.repository.ChannelListingRepository;
 import com.octoflow.api.repository.SyncJobRepository;
 import org.slf4j.Logger;
@@ -35,6 +37,7 @@ public class SyncJobProcessor {
 
     private final SyncJobRepository jobRepository;
     private final ChannelListingRepository listingRepository;
+    private final AllocationPlanItemRepository allocationPlanItemRepository;
     private final ChannelDeliveryEligibility eligibility;
     private final ChannelAdapterRouter adapterRouter;
     private final ChannelEvidenceRecorder evidenceRecorder;
@@ -46,6 +49,7 @@ public class SyncJobProcessor {
 
     public SyncJobProcessor(SyncJobRepository jobRepository,
                             ChannelListingRepository listingRepository,
+                            AllocationPlanItemRepository allocationPlanItemRepository,
                             ChannelDeliveryEligibility eligibility,
                             ChannelAdapterRouter adapterRouter,
                             ChannelEvidenceRecorder evidenceRecorder,
@@ -55,6 +59,7 @@ public class SyncJobProcessor {
                             @Value("${app.sync.retry-max-ms:60000}") long retryMaxMs) {
         this.jobRepository = jobRepository;
         this.listingRepository = listingRepository;
+        this.allocationPlanItemRepository = allocationPlanItemRepository;
         this.eligibility = eligibility;
         this.adapterRouter = adapterRouter;
         this.evidenceRecorder = evidenceRecorder;
@@ -145,12 +150,18 @@ public class SyncJobProcessor {
             block(job, listing, String.join(" ", issues), "PREFLIGHT");
             return null;
         }
+        if (currentTargetBlocked(listing)) {
+            block(job, listing,
+                    "The allocation for this target is blocked; resolve it before syncing inventory.",
+                    "ALLOCATION_BLOCKED");
+            return null;
+        }
 
         ChannelInventoryAdapter adapter;
         try {
             adapter = adapterRouter.require(channel);
         } catch (ChannelAdapterException ex) {
-            block(job, listing, ex.getMessage(), ex.getKind().name());
+            block(job, listing, ex.getMessage(), ex.reasonCodeOrKind());
             return null;
         }
 
@@ -258,16 +269,28 @@ public class SyncJobProcessor {
 
     @Transactional
     public void completeFailure(SyncJobSnapshot snapshot, ChannelAdapterException.Kind kind, String message) {
+        completeFailure(snapshot, kind, kind.name(), message);
+    }
+
+    @Transactional
+    public void completeFailure(SyncJobSnapshot snapshot, ChannelAdapterException.Kind kind,
+                                String reasonCode, String message) {
         ChannelListing listing = listingRepository.findByIdForUpdate(snapshot.listingId()).orElse(null);
         SyncJob job = jobRepository.findByIdForUpdate(snapshot.jobId()).orElse(null);
         if (!ownedAndProcessing(job, claimOf(snapshot))) {
             return;
         }
-        fail(job, listing, kind, message, snapshot.adapterName());
+        fail(job, listing, kind, reasonCode, message, snapshot.adapterName());
     }
 
     @Transactional
     public void completeFailure(JobClaim claim, ChannelAdapterException.Kind kind, String message) {
+        completeFailure(claim, kind, kind.name(), message);
+    }
+
+    @Transactional
+    public void completeFailure(JobClaim claim, ChannelAdapterException.Kind kind,
+                                String reasonCode, String message) {
         Long listingId = jobRepository.findListingIdById(claim.jobId());
         ChannelListing listing = listingId == null ? null
                 : listingRepository.findByIdForUpdate(listingId).orElse(null);
@@ -275,7 +298,8 @@ public class SyncJobProcessor {
         if (!ownedAndProcessing(job, claim)) {
             return;
         }
-        fail(job, listing, kind, message, job.getAdapter() == null ? "unknown" : job.getAdapter());
+        fail(job, listing, kind, reasonCode, message,
+                job.getAdapter() == null ? "unknown" : job.getAdapter());
     }
 
     @Transactional
@@ -297,8 +321,10 @@ public class SyncJobProcessor {
     }
 
     private void fail(SyncJob job, ChannelListing listing,
-                      ChannelAdapterException.Kind kind, String message, String adapterName) {
+                      ChannelAdapterException.Kind kind, String reasonCode,
+                      String message, String adapterName) {
         String safeMessage = truncate(message, 500);
+        String errorCode = reasonCode == null || reasonCode.isBlank() ? kind.name() : reasonCode;
         job.setLastError(safeMessage);
         job.setAdapter(adapterName);
         boolean blocked = kind == ChannelAdapterException.Kind.UNAVAILABLE;
@@ -343,7 +369,7 @@ public class SyncJobProcessor {
                 job.getVerifiedQuantity(),
                 job.getRemoteBefore(),
                 job.getRemoteAfter(),
-                kind.name(),
+                errorCode,
                 safeMessage,
                 job.getIdempotencyReference());
 
@@ -444,6 +470,11 @@ public class SyncJobProcessor {
                 || listing.getAllocatedQuota() != job.getTargetQuantity();
     }
 
+    private boolean currentTargetBlocked(ChannelListing listing) {
+        return allocationPlanItemRepository.existsForListingAtRevision(listing.getId(),
+                listing.getTargetAllocationRevision(), AllocationPlan.Status.BLOCKED);
+    }
+
     private String staleReason(SyncJobSnapshot snapshot, SyncJob job, ChannelListing listing) {
         if (targetChanged(job, listing)) {
             return "Target changed while the adapter was running.";
@@ -476,6 +507,13 @@ public class SyncJobProcessor {
         copy.setName(channel.getName());
         copy.setEnvironment(channel.getEnvironment());
         copy.setStatus(channel.getStatus());
+        // The adapter runs outside this transaction, so it must see the same proof of connection
+        // that eligibility saw. Without these fields every real-connector job would be blocked.
+        copy.setConnectorName(channel.getConnectorName());
+        copy.setConnectorVersion(channel.getConnectorVersion());
+        copy.setConnectionVerifiedAt(channel.getConnectionVerifiedAt());
+        copy.setConnectionProductsRead(channel.isConnectionProductsRead());
+        copy.setConnectionAuthMode(channel.getConnectionAuthMode());
         return copy;
     }
 

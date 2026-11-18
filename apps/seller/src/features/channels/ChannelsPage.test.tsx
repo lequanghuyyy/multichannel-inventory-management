@@ -4,7 +4,6 @@ import { ApiRequestError } from '../../core/api-error';
 import { ChannelDetailPage } from './ChannelDetailPage';
 import { ChannelsPage } from './ChannelsPage';
 import { ChannelApiMappingLedger } from './components/ChannelApiMappingLedger';
-import { AuthContext } from '../auth/AuthProvider';
 
 afterEach(() => {
   cleanup();
@@ -69,23 +68,6 @@ const { getChannel, getChannelAPICapabilities, listChannels, listChannelMappings
 // mock, which is the kind of thing that costs an afternoon.
 vi.mock('../../api/channels', () => ({ getChannel, getChannelAPICapabilities, listChannels, listChannelMappings }));
 
-const { getWooCommerceStatus, connectWooCommerceStore } = vi.hoisted(() => ({
-  getWooCommerceStatus: vi.fn(),
-  connectWooCommerceStore: vi.fn(),
-}));
-vi.mock('../../api/woocommerce', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../../api/woocommerce')>(),
-  getWooCommerceStatus,
-  connectWooCommerceStore,
-}));
-getWooCommerceStatus.mockResolvedValue({ enabled: false, configured: false, connected: false, connection_status: 'disconnected' });
-
-function renderAdminChannels() {
-  render(<AuthContext.Provider value={{ status: 'authenticated', user: { role: 'ADMIN' } as never, error: null, login: async () => {}, logout: async () => {}, retry: () => {} }}>
-    <ChannelsPage mode="default" />
-  </AuthContext.Provider>);
-}
-
 getChannelAPICapabilities.mockResolvedValue({ capabilities: [], sandbox_skus: [] });
 
 const liveChannel = (overrides: Record<string, unknown> = {}) => ({
@@ -105,25 +87,6 @@ const channelResolves = (overrides: Record<string, unknown> = {}) =>
   getChannel.mockImplementation(() => Promise.resolve(liveChannel(overrides)));
 
 describe('ChannelsPage · live API', () => {
-  it('lets an ADMIN register a WooCommerce website from the existing channels page', async () => {
-    listChannels.mockImplementation(() => Promise.resolve(apiPage([])));
-    getWooCommerceStatus.mockResolvedValue({ enabled: true, configured: true, connected: false, connection_status: 'disconnected' });
-    connectWooCommerceStore.mockResolvedValue({ enabled: true, configured: true, connected: true, connection_status: 'connected', channel_id: '30000000-0000-4000-8000-000000000009' });
-    renderAdminChannels();
-    const connect = await screen.findByRole('button', { name: 'Kết nối website WooCommerce' });
-    fireEvent.click(connect);
-    await waitFor(() => expect(connectWooCommerceStore).toHaveBeenCalledOnce());
-    await waitFor(() => expect(window.location.pathname).toBe('/channels/30000000-0000-4000-8000-000000000009'));
-  });
-
-  it('keeps the WooCommerce registration action disabled until server config is enabled', async () => {
-    listChannels.mockImplementation(() => Promise.resolve(apiPage([])));
-    getWooCommerceStatus.mockResolvedValue({ enabled: false, configured: false, connected: false, connection_status: 'disconnected' });
-    renderAdminChannels();
-    expect(await screen.findByRole('button', { name: 'WooCommerce chưa bật' })).toBeDisabled();
-    expect(screen.getByTitle('Bật WOOCOMMERCE_ENABLED và nhập đủ server secrets trước.')).toBeInTheDocument();
-  });
-
   it('renders the pair (type, environment) so a simulator is not read as a marketplace', async () => {
     listChannels.mockImplementation(() => Promise.resolve(apiPage([
       liveChannel(),

@@ -437,6 +437,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/channels/{channelId}/woocommerce/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify the WooCommerce connection through the live wc/v3 API
+         * @description The channel becomes CONNECTED only after the backend reads products from the store. Inventory writes remain disabled unless the dedicated write flag is on.
+         */
+        post: operations["verify"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/channels/{channelId}/woocommerce/disconnect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disconnect a WooCommerce channel locally
+         * @description Clears connection verification metadata but keeps mappings and evidence. No remote store data is changed.
+         */
+        post: operations["disconnect"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/channels/{channelId}/mappings": {
         parameters: {
             query?: never;
@@ -911,6 +951,26 @@ export interface paths {
         };
         /** Get sales channel status and details */
         get: operations["getChannelById"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/channels/{channelId}/woocommerce/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get WooCommerce connection, write flag and mapping status for a channel
+         * @description Reports what was actually verified. A CONNECTED channel does not imply inventory write permission.
+         */
+        get: operations["status"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1563,6 +1623,44 @@ export interface components {
             version?: number;
             /** Format: date-time */
             updated_at?: string;
+        };
+        WooCommerceChannelStatusResponse: {
+            /** Format: int64 */
+            channel_id?: number;
+            channel_code?: string;
+            channel_name?: string;
+            environment?: string;
+            connector?: string;
+            api_version?: string;
+            connector_enabled?: boolean;
+            connector_configured?: boolean;
+            environment_allowed?: boolean;
+            connection_status?: string;
+            connection_verified?: boolean;
+            /** Format: date-time */
+            connection_verified_at?: string;
+            products_read?: boolean;
+            auth_mode?: string;
+            store_name?: string;
+            store_url?: string;
+            wc_version?: string;
+            wp_version?: string;
+            currency?: string;
+            inventory_write_enabled?: boolean;
+            inventory_write_available?: boolean;
+            read_available?: boolean;
+            /** Format: int64 */
+            mapping_count?: number;
+            /** Format: int64 */
+            verified_mapping_count?: number;
+            /** Format: int64 */
+            drift_count?: number;
+            /** Format: int64 */
+            mapping_error_count?: number;
+            last_error_code?: string;
+            last_error_message?: string;
+            /** Format: date-time */
+            checked_at?: string;
         };
         RegisterChannelMappingRequest: {
             sku?: string;
@@ -2421,6 +2519,86 @@ export interface operations {
             };
         };
     };
+    verify: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                channelId: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Connection verified */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": components["schemas"]["WooCommerceChannelStatusResponse"];
+                };
+            };
+            /** @description Channel is not a development/test channel */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": components["schemas"]["WooCommerceChannelStatusResponse"];
+                };
+            };
+            /** @description WooCommerce rejected the request or returned invalid data */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": components["schemas"]["WooCommerceChannelStatusResponse"];
+                };
+            };
+            /** @description Connector is disabled or not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": components["schemas"]["WooCommerceChannelStatusResponse"];
+                };
+            };
+            /** @description WooCommerce timed out; result is uncertain */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": components["schemas"]["WooCommerceChannelStatusResponse"];
+                };
+            };
+        };
+    };
+    disconnect: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                channelId: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": components["schemas"]["WooCommerceChannelStatusResponse"];
+                };
+            };
+        };
+    };
     getChannelListings: {
         parameters: {
             query?: never;
@@ -3149,6 +3327,28 @@ export interface operations {
                 };
                 content: {
                     "*/*": components["schemas"]["ChannelResponse"];
+                };
+            };
+        };
+    };
+    status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                channelId: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": components["schemas"]["WooCommerceChannelStatusResponse"];
                 };
             };
         };

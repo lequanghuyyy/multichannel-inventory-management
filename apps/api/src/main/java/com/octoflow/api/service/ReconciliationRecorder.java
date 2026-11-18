@@ -86,7 +86,7 @@ public class ReconciliationRecorder {
 
         resolveUncertainJobs(listing, target, remoteQuantity, remoteBefore, adapterName, reference);
 
-        if (!matches && !allocationInFlight(listing.getId())) {
+        if (!matches && !allocationInFlight(listing.getId()) && !currentTargetBlocked(listing)) {
             jobRepository.supersedeActiveForListing(listing.getId(),
                     "Reconciliation found drift; queued a fresh correction.");
             SyncJob correction = new SyncJob();
@@ -148,6 +148,16 @@ public class ReconciliationRecorder {
         return allocationPlanItemRepository.existsActiveForListing(listingId,
                 AllocationPlan.Status.APPLYING,
                 List.of(AllocationPlanItem.Status.PENDING, AllocationPlanItem.Status.RETRY_PENDING));
+    }
+
+    /**
+     * A blocked allocation leaves the listing target unconfirmed. Auto-correcting the remote to
+     * that target would publish a quota the operator never successfully delivered (for example,
+     * writing 0 after an 8-unit increase was blocked).
+     */
+    private boolean currentTargetBlocked(ChannelListing listing) {
+        return allocationPlanItemRepository.existsForListingAtRevision(listing.getId(),
+                listing.getTargetAllocationRevision(), AllocationPlan.Status.BLOCKED);
     }
 
     private ChannelSyncEvidenceResponse toResponse(ChannelSyncEvidence evidence) {

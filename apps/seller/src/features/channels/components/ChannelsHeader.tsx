@@ -1,4 +1,3 @@
-import type { WooCommerceStatus } from '../../../api/woocommerce';
 import type { LazadaStatus } from '../../../api/lazada';
 import { PageIntroFrame } from '../../../components/common/PageIntroFrame';
 import { Button } from '../../../components/ui/Button';
@@ -11,11 +10,6 @@ export function ChannelsHeader({
   ebayConnections,
   ebayConnecting,
   onConnectEbay,
-  woocommerceStatus,
-  woocommerceStatusError,
-  woocommerceConnecting,
-  onConnectWooCommerce,
-  onOpenWooCommerce,
   lazadaStatus,
   lazadaConnecting,
   onConnectLazada,
@@ -28,18 +22,11 @@ export function ChannelsHeader({
   ebayConnections: number;
   ebayConnecting: boolean;
   onConnectEbay: () => void;
-  woocommerceStatus: WooCommerceStatus | null;
-  woocommerceStatusError: string | null;
-  woocommerceConnecting: boolean;
-  onConnectWooCommerce: () => void;
-  onOpenWooCommerce: () => void;
   lazadaStatus: LazadaStatus | null;
   lazadaConnecting: boolean;
   onConnectLazada: () => void;
   onOpenLazada: () => void;
 }) {
-  const wooReady = !!woocommerceStatus?.enabled && !!woocommerceStatus.configured;
-
   return (
     <PageIntroFrame>
       <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
@@ -54,10 +41,6 @@ export function ChannelsHeader({
           {canManage && ebayEnabled ? <Button loading={ebayConnecting} loadingLabel="Đang mở eBay…" onClick={onConnectEbay} leadingIcon={<span className="font-display text-sm font-black tracking-tight" aria-hidden="true"><span className="text-[#e53238]">e</span><span className="text-[#0064d2]">B</span><span className="text-[#f5af02]">a</span><span className="text-[#86b817]">y</span></span>}>
             {ebayConnections ? 'Kết nối thêm eBay' : 'Kết nối eBay Sandbox'}
           </Button> : null}
-          {canManage ? <Button variant="secondary" disabled={!wooReady || !!woocommerceStatus?.channel_id} loading={woocommerceConnecting} loadingLabel="Đang xác minh WooCommerce…" title={woocommerceStatusError || (!wooReady ? 'Bật WOOCOMMERCE_ENABLED và nhập đủ server secrets trước.' : woocommerceStatus?.channel_id ? 'WooCommerce đã đăng ký; mở kênh từ danh sách để xem trạng thái.' : undefined)} onClick={onConnectWooCommerce}>
-            {woocommerceStatus?.channel_id ? 'WooCommerce đã kết nối' : wooReady ? 'Kết nối website WooCommerce' : 'WooCommerce chưa bật'}
-          </Button> : null}
-          {woocommerceStatus?.channel_id ? <Button variant="ghost" onClick={onOpenWooCommerce}>Mở kênh website</Button> : null}
           {canManage && lazadaStatus?.enabled ? <Button variant="secondary" loading={lazadaConnecting} loadingLabel="Đang mở Lazada…" onClick={onConnectLazada}>
             {lazadaStatus.connection?.status === 'connected' ? 'Kết nối lại Lazada' : 'Kết nối Lazada VN'}
           </Button> : null}

@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Channel } from '../../../api/channels';
-import { connectWooCommerceStore, disconnectWooCommerceStore, getWooCommerceStatus, getWooCommerceWebhookHealth, verifyWooCommerceStore, type WooCommerceStatus, type WooCommerceWebhookHealth } from '../../../api/woocommerce';
+import {
+  disconnectWooCommerceChannel,
+  getWooCommerceChannelStatus,
+  verifyWooCommerceChannel,
+  type WooCommerceChannelStatus,
+} from '../../../api/woocommerce';
 import { Button } from '../../../components/ui/Button';
 import { Card } from '../../../components/ui/Card';
 import { Modal } from '../../../components/ui/Modal';
@@ -8,8 +13,7 @@ import { StatusBadge } from '../../../components/common/StatusBadge';
 import { EmptyState, ErrorState, LoadingState } from '../../../components/common/ScreenState';
 
 export function WooCommerceSettingsPanel({ channel, canManage, onUpdated }: { channel: Channel; canManage: boolean; onUpdated: () => void }) {
-  const [status, setStatus] = useState<WooCommerceStatus | null>(null);
-  const [health, setHealth] = useState<WooCommerceWebhookHealth | null>(null);
+  const [status, setStatus] = useState<WooCommerceChannelStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -18,16 +22,13 @@ export function WooCommerceSettingsPanel({ channel, canManage, onUpdated }: { ch
   const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true); setError(null);
     try {
-      const current = await getWooCommerceStatus(signal);
-      if (signal?.aborted) return;
-      setStatus(current);
-      if (current.channel_id === channel.id) {
-        try { setHealth(await getWooCommerceWebhookHealth(channel.id, signal)); }
-        catch (cause) { if (!signal?.aborted) setHealth(null); }
-      } else setHealth(null);
+      const current = await getWooCommerceChannelStatus(channel.id, signal);
+      if (!signal?.aborted) setStatus(current);
     } catch (cause) {
       if (!signal?.aborted) setError(messageOf(cause));
-    } finally { if (!signal?.aborted) setLoading(false); }
+    } finally {
+      if (!signal?.aborted) setLoading(false);
+    }
   }, [channel.id]);
 
   useEffect(() => {
@@ -36,24 +37,31 @@ export function WooCommerceSettingsPanel({ channel, canManage, onUpdated }: { ch
     return () => controller.abort();
   }, [load]);
 
-  const run = async (operation: () => Promise<WooCommerceStatus>) => {
+  const run = async (operation: () => Promise<WooCommerceChannelStatus>) => {
     if (!canManage || busy) return;
     setBusy(true); setError(null);
-    try { setStatus(await operation()); await load(); onUpdated(); }
-    catch (cause) { setError(messageOf(cause)); }
-    finally { setBusy(false); setDisconnectOpen(false); }
+    try {
+      setStatus(await operation());
+      await load();
+      onUpdated();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+      setDisconnectOpen(false);
+    }
   };
 
-  const connected = status?.connected === true && status.channel_id === channel.id;
-  const badge = connected ? { label: 'Đã xác minh', tone: 'success' as const }
-    : status?.connection_status === 'error' ? { label: 'Có lỗi', tone: 'danger' as const }
-      : { label: 'Chưa kết nối', tone: 'neutral' as const };
+  const verified = status?.connection_verified === true;
+  const badge = verified ? { label: 'Kết nối đã xác minh', tone: 'success' as const }
+    : status?.connection_status === 'error' ? { label: 'Có lỗi kết nối', tone: 'danger' as const }
+      : { label: 'Chưa xác minh', tone: 'neutral' as const };
 
   return <div className="grid min-w-0 gap-5">
     <header><h2 className="font-display text-xl font-bold text-on-surface">Cấu hình cửa hàng</h2></header>
     <Card className="grid min-w-0 gap-4 p-5">
       <header className="flex flex-wrap items-start justify-between gap-3">
-        <div><p className="font-body text-caption font-semibold uppercase tracking-[0.13em] text-graphite">Thông tin kết nối</p><h2 className="mt-1 font-display text-lg font-bold text-on-surface">Cửa hàng WooCommerce</h2><p className="mt-1 max-w-2xl text-sm leading-6 text-graphite">Kết nối WordPress, kiểm tra trạng thái đồng bộ và quản lý các quyền của cửa hàng.</p></div>
+        <div><p className="font-body text-caption font-semibold uppercase tracking-[0.13em] text-graphite">Kết nối WooCommerce</p><h2 className="mt-1 font-display text-lg font-bold text-on-surface">{status?.store_name || channel.name}</h2><p className="mt-1 max-w-2xl text-sm leading-6 text-graphite">Kết nối chỉ được coi là đã xác minh sau khi backend đọc được sản phẩm qua WooCommerce REST API <code className="font-mono text-xs">wc/v3</code>. Kết nối không đồng nghĩa với quyền ghi tồn kho.</p></div>
         <StatusBadge tone={badge.tone}>{badge.label}</StatusBadge>
       </header>
       {loading ? <LoadingState label="Đang kiểm tra kết nối WooCommerce…" /> : null}
@@ -64,58 +72,70 @@ export function WooCommerceSettingsPanel({ channel, canManage, onUpdated }: { ch
           <h3 className="font-body text-sm font-semibold text-on-surface">Cửa hàng</h3>
           <dl className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
             <Fact label="Tên cửa hàng" value={status.store_name || channel.name} />
-            <Fact label="Địa chỉ cửa hàng" value={status.store_origin || 'Chưa xác minh'} />
-            <Fact label="Môi trường" value="Cửa hàng phát triển · tự host" />
-            <Fact label="Nền tảng · phiên bản" value={status.connected ? `WooCommerce ${status.wc_version ?? '—'} · WordPress ${status.wp_version ?? '—'}` : 'Chưa xác minh'} />
-            <Fact label="Tiền tệ · Core" value={`${status.currency ?? '—'} · ${status.core_currency ?? '—'} · ${status.currency_compatible ? 'tương thích' : 'chưa khớp'}`} />
-            <Fact label="Xác thực" value={status.auth_mode === 'basic_tls' ? 'HTTP Basic qua TLS' : status.auth_mode === 'oauth1a_header' ? 'OAuth 1.0a qua header' : 'Chưa cấu hình'} />
-            <Fact label="Xác minh gần nhất" value={formatTime(status.last_verified_at)} />
-            <Fact label="Thông tin đăng nhập API" value={status.configured ? 'Được lưu an toàn ở máy chủ' : 'Chưa cấu hình ở máy chủ'} />
-            <Fact label="Lỗi kết nối gần nhất" value={status.last_error_code || 'Không có'} />
+            <Fact label="Địa chỉ cửa hàng" value={status.store_url || 'Chưa xác minh'} />
+            <Fact label="Môi trường" value={status.environment || channel.environment || '—'} />
+            <Fact label="Nền tảng · phiên bản" value={status.connection_verified ? `WooCommerce ${status.wc_version ?? '—'} · WordPress ${status.wp_version ?? '—'}` : 'Chưa xác minh'} />
+            <Fact label="REST API" value={status.api_version || '—'} />
+            <Fact label="Xác thực" value={authLabel(status.auth_mode)} />
+            <Fact label="Xác minh gần nhất" value={formatTime(status.connection_verified_at)} />
+            <Fact label="Kiểm tra gần nhất" value={formatTime(status.checked_at)} />
+            <Fact label="Connector" value={status.connector || 'woocommerce'} />
           </dl>
         </section>
         <section className="grid min-w-0 gap-3 rounded-control border border-outline-variant/50 p-4">
-          <h3 className="font-body text-sm font-semibold text-on-surface">Quyền và đồng bộ</h3>
+          <h3 className="font-body text-sm font-semibold text-on-surface">Quyền đọc và ghi</h3>
           <dl className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            <Fact label="Đọc sản phẩm" value={status.capabilities.products_read ? 'Đã bật' : 'Chưa sẵn sàng'} />
-            <Fact label="Nhập đơn hàng" value={status.capabilities.orders_read ? 'Đã bật' : 'Chưa sẵn sàng'} />
-            <Fact label="Tiền tệ VND" value={status.capabilities.currency_vnd ? 'Đã xác minh' : 'Chưa khớp'} />
-            <Fact label="Cập nhật tồn kho" value={status.write_enabled ? 'Được bật · cần liên kết SKU đã xác minh' : 'Đang tắt'} />
-            <Fact label="Cập nhật sản phẩm" value={status.product_write_enabled ? 'Được bật' : 'Đang tắt'} />
-            <Fact label="Cập nhật đơn hàng" value={status.order_write_enabled ? 'Được bật' : 'Chưa hỗ trợ'} />
-            <Fact label="Nhập và đối soát đơn" value={status.order_import_enabled ? 'Được bật' : 'Đang tắt'} />
-            <Fact label="Webhook callback" value={status.callback_configured ? 'Đã cấu hình' : 'Chưa cấu hình'} />
+            <Fact label="Đọc sản phẩm WooCommerce" value={status.products_read && status.read_available ? 'Đã xác minh' : 'Chưa sẵn sàng'} />
+            <Fact label="Đọc và xác minh mapping" value={status.read_available ? 'Sẵn sàng' : 'Bị chặn'} />
+            <Fact label="Cờ ghi tồn kho" value={status.inventory_write_enabled ? 'Đang bật' : 'Đang tắt'} />
+            <Fact label="Ghi tồn kho khả dụng" value={status.inventory_write_available ? 'Sẵn sàng' : 'Chưa sẵn sàng'} />
+            <Fact label="Mapping đã xác minh" value={`${(status.verified_mapping_count ?? 0).toLocaleString('vi-VN')} / ${(status.mapping_count ?? 0).toLocaleString('vi-VN')}`} />
+            <Fact label="Listing lệch / mapping lỗi" value={`${(status.drift_count ?? 0).toLocaleString('vi-VN')} / ${(status.mapping_error_count ?? 0).toLocaleString('vi-VN')}`} />
           </dl>
+          <p className="rounded-control bg-surface-container-low p-3 text-xs leading-5 text-graphite">
+            {status.inventory_write_enabled
+              ? 'Cờ ghi tồn kho đang bật. Mỗi lần ghi vẫn phải có mapping đã xác minh, đúng SKU và bật quản lý tồn kho trên WooCommerce; backend gửi số tuyệt đối và đọc lại để xác minh.'
+              : 'Cờ ghi tồn kho đang tắt. Kênh chỉ đọc và xác minh mapping; không có lệnh ghi nào được gửi tới WooCommerce.'}
+          </p>
+        </section>
+        <section className="grid min-w-0 gap-3 rounded-control border border-outline-variant/50 p-4">
+          <h3 className="font-body text-sm font-semibold text-on-surface">Chưa hỗ trợ trong giai đoạn này</h3>
+          <p className="text-sm leading-6 text-graphite">OctoFlow chưa nhập đơn hàng, chưa dùng webhook và chưa tạo/đăng bán sản phẩm trên WooCommerce. Các màn hình cũ cho đơn hàng hoặc đăng bán không phải bằng chứng về kết nối này.</p>
         </section>
       </> : null}
+      {status?.last_error_code || status?.last_error_message ? <p role="status" className="rounded-control bg-error-container/40 p-3 text-sm text-error">Lỗi gần nhất: {status.last_error_code || 'WOO_ERROR'}{status.last_error_message ? ` · ${status.last_error_message}` : ''}</p> : null}
+      {status && !status.connector_enabled ? <p role="status" className="rounded-control bg-surface-container-low p-3 text-sm text-graphite">Connector WooCommerce đang tắt ở backend. Bật <code className="font-mono text-xs">WOOCOMMERCE_ENABLED</code> và cấu hình credentials trên máy chủ.</p> : null}
+      {status && status.connector_enabled && !status.connector_configured ? <p role="status" className="rounded-control bg-surface-container-low p-3 text-sm text-graphite">Connector đã bật nhưng chưa có đủ thông tin xác thực trên máy chủ.</p> : null}
+      {status && !status.environment_allowed ? <p role="status" className="rounded-control bg-error-container/40 p-3 text-sm text-error">Môi trường của kênh không nằm trong danh sách được phép của connector.</p> : null}
       {canManage ? <div className="flex flex-wrap gap-2 border-t border-outline-variant/50 pt-4">
-        {!connected ? <Button size="sm" loading={busy} disabled={loading} onClick={() => void run(connectWooCommerceStore)}>Kết nối cửa hàng</Button> : null}
-        <Button variant="secondary" size="sm" loading={busy} disabled={loading || !status?.enabled} onClick={() => void run(verifyWooCommerceStore)}>Kiểm tra kết nối</Button>
-        {connected ? <Button variant="ghost" size="sm" disabled={busy} onClick={() => setDisconnectOpen(true)}>Ngắt kết nối</Button> : null}
-      </div> : <p className="border-t border-outline-variant/50 pt-4 text-xs leading-5 text-graphite">Nhân viên có thể xem trạng thái. Chỉ quản trị viên mới được kết nối hoặc ngắt kết nối cửa hàng.</p>}
-      {status?.last_error_code ? <p role="status" className="rounded-control bg-error-container/40 p-3 text-sm text-error">Lỗi kết nối gần nhất: {status.last_error_code}</p> : null}
+        <Button variant="secondary" size="sm" loading={busy} disabled={loading || !status?.connector_enabled} onClick={() => void run(() => verifyWooCommerceChannel(channel.id))}>Kiểm tra kết nối</Button>
+        {verified ? <Button variant="ghost" size="sm" disabled={busy} onClick={() => setDisconnectOpen(true)}>Ngắt kết nối</Button> : null}
+      </div> : <p className="border-t border-outline-variant/50 pt-4 text-xs leading-5 text-graphite">Nhân viên có thể xem trạng thái. Chỉ quản trị viên mới được xác minh hoặc ngắt kết nối cửa hàng.</p>}
     </Card>
 
-    <Card className="grid min-w-0 gap-3 p-5">
-      <header className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-body text-caption font-semibold uppercase tracking-[0.13em] text-graphite">Thông báo và khôi phục đơn hàng</p><h3 className="mt-1 font-display text-base font-bold text-on-surface">Webhook và đồng bộ dự phòng</h3></div><StatusBadge tone={health?.active ? 'success' : health?.status === 'partial' ? 'warning' : ['unavailable', 'error'].includes(health?.status ?? '') ? 'danger' : 'neutral'}>{webhookLabel(health?.status)}</StatusBadge></header>
-      {health ? <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        <Fact label="Chủ đề webhook đang hoạt động" value={health.active_topics.join(', ') || 'Chưa có'} />
-        <Fact label="Địa chỉ nhận webhook" value={health.callback_configured ? 'Đã cấu hình ở máy chủ' : 'Chưa cấu hình'} />
-        <Fact label="Nhận thông báo thành công gần nhất" value={formatTime(health.last_successful_at)} />
-        <Fact label="Thông báo lỗi / bị chặn" value={`${health.failed_receipts} cần thử lại · ${health.dead_receipts} bị chặn`} />
-        <Fact label="Đồng bộ dự phòng" value={health.polling_enabled ? `Đang bật · lần chạy ${formatTime(health.last_poll_at)}` : 'Đang tắt'} />
-        <Fact label="Lỗi đồng bộ gần nhất" value={health.poll_error_code || 'Không có'} />
-      </dl> : <p className="text-sm leading-6 text-graphite">Chưa có dữ liệu webhook. OctoFlow lưu các thông báo đã nhận và dùng đồng bộ dự phòng để phát hiện đơn hàng.</p>}
-      {health && !health.active && health.polling_enabled ? <p className="rounded-control bg-surface-container-low p-3 text-xs leading-5 text-graphite">Webhook đang tắt hoặc chưa đầy đủ. Đồng bộ dự phòng vẫn hoạt động nên đơn mới có thể được phát hiện trễ theo chu kỳ.</p> : null}
-    </Card>
-
-    <Modal open={disconnectOpen} onClose={() => setDisconnectOpen(false)} title="Ngắt kết nối WooCommerce?" description="OctoFlow sẽ ngừng nhận và đồng bộ đơn hàng, tồn kho từ cửa hàng này. Lịch sử thông báo và liên kết SKU vẫn được giữ lại." footer={<><Button variant="ghost" onClick={() => setDisconnectOpen(false)}>Hủy</Button><Button variant="danger" loading={busy} onClick={() => void run(disconnectWooCommerceStore)}>Ngắt kết nối</Button></>}>
-      <p className="text-sm leading-6 text-graphite">Thao tác này không xóa WordPress, WooCommerce hoặc dữ liệu cửa hàng.</p>
+    <Modal open={disconnectOpen} onClose={() => setDisconnectOpen(false)} title="Ngắt kết nối WooCommerce?" description="OctoFlow sẽ xóa trạng thái xác minh kết nối của kênh này. Mapping và bằng chứng tồn kho vẫn được giữ lại." footer={<><Button variant="ghost" onClick={() => setDisconnectOpen(false)}>Hủy</Button><Button variant="danger" loading={busy} onClick={() => void run(() => disconnectWooCommerceChannel(channel.id))}>Ngắt kết nối</Button></>}>
+      <p className="text-sm leading-6 text-graphite">Thao tác này chỉ thay đổi dữ liệu cục bộ trong OctoFlow. Không có dữ liệu WordPress hoặc WooCommerce nào bị xóa.</p>
     </Modal>
   </div>;
 }
 
-function Fact({ label, value }: { label: string; value: string }) { return <div className="min-w-0"><dt className="text-[11px] font-semibold uppercase tracking-wide text-graphite">{label}</dt><dd className="mt-1 break-words text-sm font-medium text-on-surface">{value}</dd></div>; }
-function formatTime(value?: string | null): string { if (!value) return 'Chưa có'; const date = new Date(value); return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', dateStyle: 'medium', timeStyle: 'short' }); }
-function messageOf(error: unknown): string { return error instanceof Error ? error.message : 'Không thể tải trạng thái WooCommerce.'; }
-function webhookLabel(status?: string) { return ({ healthy: 'Đang hoạt động', active: 'Đang hoạt động', partial: 'Hoạt động một phần', unavailable: 'Chưa sẵn sàng', error: 'Cần kiểm tra', disconnected: 'Chưa kết nối', disabled: 'Đang tắt' } as Record<string, string>)[status ?? ''] ?? 'Chưa xác minh'; }
+function Fact({ label, value }: { label: string; value: string }) {
+  return <div className="min-w-0"><dt className="text-[11px] font-semibold uppercase tracking-wide text-graphite">{label}</dt><dd className="mt-1 break-words text-sm font-medium text-on-surface">{value}</dd></div>;
+}
+
+function authLabel(mode?: string | null): string {
+  if (mode === 'basic_tls') return 'HTTP Basic qua TLS';
+  if (mode === 'query_tls') return 'Query key qua TLS';
+  if (mode === 'oauth1_dev_http' || mode === 'query_dev_http') return 'OAuth 1.0a · HTTP dev host';
+  return 'Chưa xác minh';
+}
+
+function formatTime(value?: string | null): string {
+  if (!value) return 'Chưa có';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : 'Không thể tải trạng thái WooCommerce.';
+}

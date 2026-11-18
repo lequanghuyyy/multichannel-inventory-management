@@ -15,6 +15,7 @@ import { ChannelSettingsTab } from './components/ChannelSettingsTab';
 import { ShopifyCapabilityPanel } from './components/ShopifyCapabilityPanel';
 import { ShopifyIntegrationPanel } from './components/ShopifyIntegrationPanel';
 import { WooCommerceSettingsPanel } from './components/WooCommerceSettingsPanel';
+import { WooCommerceMappingPanel } from './components/WooCommerceMappingPanel';
 import { LazadaPanel } from './components/LazadaPanel';
 import { LazadaOrdersPanel } from './components/LazadaOrdersPanel';
 import { ChannelApiProductsTab } from './components/ChannelApiProductsTab';
@@ -253,6 +254,8 @@ export function ChannelDetailPage({ id, mode }: { id: string; mode: DemoMode }) 
       {!fixture && currentChannel && activeTab === 'overview' ? <ChannelOverviewTab key={`${currentChannel.id}:${attempt}`} channel={currentChannel} shopifyStatus={shopifyStatus} mappings={mappings} issues={issues} issueCount={issueCount} onNavigate={selectTab} /> : null}
       {!fixture && currentChannel && activeTab === 'products' ? currentChannel.code === 'lazada'
         ? <LazadaPanel key={`${currentChannel.id}:${attempt}`} channel={currentChannel} tab="products" canManage={canManage} onUpdated={refresh} onSettings={() => selectTab('settings')} />
+        : currentChannel.code === 'woocommerce'
+        ? <WooCommerceMappingPanel key={`${currentChannel.id}:${attempt}`} channel={currentChannel} canManage={canManage} onUpdated={refreshMappings} />
         : <ChannelApiProductsTab
             channel={currentChannel}
             mappings={mappings}

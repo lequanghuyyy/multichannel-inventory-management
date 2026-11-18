@@ -52,7 +52,7 @@ public class SyncJobDispatchService {
                 log.error("Sync job #{} failed unexpectedly: {}", claim.jobId(), ex.getMessage(), ex);
                 try {
                     processor.completeFailure(claim, ChannelAdapterException.Kind.PROTOCOL,
-                            "Unexpected sync worker error: " + ex.getMessage());
+                            "UNEXPECTED_WORKER_ERROR", "Unexpected sync worker error: " + ex.getMessage());
                 } catch (RuntimeException nested) {
                     log.error("Unable to record sync job failure #{}: {}", claim.jobId(),
                             nested.getMessage(), nested);
@@ -85,7 +85,7 @@ public class SyncJobDispatchService {
         try {
             adapter = adapterRouter.require(snapshot.channel());
         } catch (ChannelAdapterException ex) {
-            processor.completeFailure(snapshot, ex.getKind(), ex.getMessage());
+            processor.completeFailure(snapshot, ex.getKind(), ex.reasonCodeOrKind(), ex.getMessage());
             return true;
         }
         try {
@@ -99,10 +99,10 @@ public class SyncJobDispatchService {
             processor.completeSuccess(snapshot, before.quantity(),
                     receipt.sentQuantity(), receipt.acknowledgedQuantity(), after.quantity());
         } catch (ChannelAdapterException ex) {
-            processor.completeFailure(snapshot, ex.getKind(), ex.getMessage());
+            processor.completeFailure(snapshot, ex.getKind(), ex.reasonCodeOrKind(), ex.getMessage());
         } catch (RuntimeException ex) {
             processor.completeFailure(snapshot, ChannelAdapterException.Kind.PROTOCOL,
-                    "Unexpected adapter error: " + ex.getMessage());
+                    "UNEXPECTED_ADAPTER_ERROR", "Unexpected adapter error: " + ex.getMessage());
         }
         return true;
     }

@@ -68,6 +68,8 @@ export type ChannelMapping = {
   reported_on_hand?: number | null;
   reported_at?: string;
   pushed_quantity?: number | null;
+  acknowledged_quantity?: number | null;
+  verified_quantity?: number | null;
   reported_quantity?: number | null;
   quantity_basis: 'legacy' | 'ats';
   legacy_on_hand?: number | null;
@@ -288,6 +290,8 @@ function toMapping(listing: ServerListing, channelId: string, sku?: string): Cha
     target_version: revision,
     reported_on_hand: listing.reported_stock ?? null,
     pushed_quantity: listing.sent_quantity ?? null,
+    acknowledged_quantity: listing.acknowledged_quantity ?? null,
+    verified_quantity: listing.verified_quantity ?? null,
     reported_quantity: listing.reported_stock ?? null,
     quantity_basis: 'ats',
     latest_sync_status: latestSync,
@@ -414,4 +418,49 @@ export async function getChannelAPIVerifications(channelId: string, signal?: Abo
   }
   if (!data) throw new Error('Lịch sử xác minh Shopify nhận về không hợp lệ.');
   return data as unknown as { verifications: ShopifyVerificationHistoryRun[] };
+}
+
+export type RegisterChannelMappingInput = {
+  /** Core SKU. The server requires it to exist and be unique. */
+  sku: string;
+  /** WooCommerce parent product ID for a variation, or the product ID for a simple product. */
+  external_listing_id: string;
+  /** Exact external SKU read from WooCommerce. Never derived from the Core SKU. */
+  external_sku: string;
+  /** WooCommerce variation ID. Omit for a simple product. */
+  external_variant_id?: string;
+};
+
+/**
+ * Registers an external identity but does not verify it.
+ *
+ * A mapping is only usable for inventory writes after the connector proves the product or
+ * variation exists, the IDs/SKU match and WooCommerce stock management is enabled.
+ */
+export async function registerChannelMapping(
+  channelId: string,
+  input: RegisterChannelMappingInput,
+  signal?: AbortSignal,
+): Promise<ChannelMapping> {
+  const client = createApiClient();
+  const { data, response } = await client.POST('/api/v1/channels/{channelId}/mappings', {
+    params: { path: { channelId: Number(channelId) } }, body: input, signal, cache: 'no-store',
+  });
+  if (!response.ok) await responseApiError(response, 'Không đăng ký được mapping SKU.');
+  if (!data) throw new Error('Mapping SKU nhận về không hợp lệ.');
+  return toMapping(data, channelId, input.sku);
+}
+
+export async function verifyChannelMapping(
+  channelId: string,
+  listingId: string,
+  signal?: AbortSignal,
+): Promise<ChannelMapping> {
+  const client = createApiClient();
+  const { data, response } = await client.POST('/api/v1/channels/{channelId}/mappings/{listingId}/verify', {
+    params: { path: { channelId: Number(channelId), listingId: Number(listingId) } }, signal, cache: 'no-store',
+  });
+  if (!response.ok) await responseApiError(response, 'Không xác minh được mapping SKU.');
+  if (!data) throw new Error('Kết quả xác minh mapping nhận về không hợp lệ.');
+  return toMapping(data, channelId);
 }

@@ -77,7 +77,7 @@ public class AllocationExecutionService {
         try {
             adapter = adapterRouter.require(action.channel());
         } catch (ChannelAdapterException ex) {
-            processor.applyFailure(action, ex.getKind(), ex.getMessage());
+            processor.applyFailure(action, ex.getKind(), ex.reasonCodeOrKind(), ex.getMessage());
             return true;
         }
 
@@ -94,9 +94,10 @@ public class AllocationExecutionService {
             processor.applySuccess(action, before.quantity(),
                     receipt.sentQuantity(), receipt.acknowledgedQuantity(), after.quantity());
         } catch (ChannelAdapterException ex) {
-            processor.applyFailure(action, ex.getKind(), ex.getMessage());
+            processor.applyFailure(action, ex.getKind(), ex.reasonCodeOrKind(), ex.getMessage());
         } catch (RuntimeException ex) {
             processor.applyFailure(action, ChannelAdapterException.Kind.PROTOCOL,
+                    ChannelAdapterException.Kind.PROTOCOL.name(),
                     "Unexpected adapter error: " + ex.getMessage());
         }
         return true;
