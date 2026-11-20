@@ -253,7 +253,7 @@ public class AllocationExecutionProcessor {
     }
 
     @Transactional
-    public void applySuccess(PlanAction action, int remoteBefore, int sent, int acknowledged, int verified) {
+    public void applySuccess(PlanAction action, int remoteBefore, int sent, Integer acknowledged, int verified) {
         AllocationPlan plan = planRepository.findByIdForUpdate(action.planId()).orElse(null);
         if (!ownedAndApplying(plan, new PlanClaim(action.planId(), action.claimGeneration()))) {
             return;
@@ -351,7 +351,7 @@ public class AllocationExecutionProcessor {
 
     @Transactional
     public void applyFailure(PlanAction action, ChannelAdapterException.Kind kind,
-                             String errorCode, String message) {
+                             String errorCode, String message, boolean writeAttempted) {
         AllocationPlan plan = planRepository.findByIdForUpdate(action.planId()).orElse(null);
         if (!ownedAndApplying(plan, new PlanClaim(action.planId(), action.claimGeneration()))) {
             return;
@@ -364,7 +364,13 @@ public class AllocationExecutionProcessor {
 
         String safeMessage = truncate(message, 500);
         item.setLastError(safeMessage);
-        boolean blocked = kind == ChannelAdapterException.Kind.UNAVAILABLE || item.getAttempts() >= maxAttempts;
+        // A timeout raised while writing is uncertain: the remote may already hold the new
+        // quantity. Retrying the PUT automatically could publish a second, uninspected change,
+        // so the item is blocked until an independent read-back (reconciliation) resolves it.
+        boolean uncertainWrite = kind == ChannelAdapterException.Kind.TIMEOUT && writeAttempted;
+        boolean blocked = kind == ChannelAdapterException.Kind.UNAVAILABLE
+                || uncertainWrite
+                || item.getAttempts() >= maxAttempts;
         if (blocked) {
             item.setStatus(AllocationPlanItem.Status.BLOCKED);
             item.setNextAttemptAt(null);
@@ -580,6 +586,7 @@ public class AllocationExecutionProcessor {
         copy.setConnectionVerifiedAt(channel.getConnectionVerifiedAt());
         copy.setConnectionProductsRead(channel.isConnectionProductsRead());
         copy.setConnectionAuthMode(channel.getConnectionAuthMode());
+        copy.setConnectionTargetFingerprint(channel.getConnectionTargetFingerprint());
         return copy;
     }
 

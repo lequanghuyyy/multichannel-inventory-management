@@ -8,6 +8,10 @@ import org.springframework.stereotype.Component;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 
@@ -220,6 +224,64 @@ public class WooCommerceProperties {
 
     public String authMode() {
         return usesBasicAuth() ? "basic_tls" : "oauth1_dev_http";
+    }
+
+    /**
+     * Non-secret fingerprint of the store this configuration points at: normalized base URL plus
+     * the consumer key. Persisting it next to the connection proof lets the backend detect that
+     * an environment change now targets a different store instead of trusting an old verification.
+     * Null when the connector is not configured.
+     */
+    public String targetFingerprint() {
+        String target = normalizedTarget();
+        if (target == null) {
+            return null;
+        }
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(target.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException ex) {
+            return null;
+        }
+    }
+
+    /**
+     * Null when the persisted connection proof still describes the configured store. A changed
+     * target must be reconnected and its mappings verified again; it is never reused silently.
+     */
+    public String storeTargetIssue(Channel channel) {
+        if (channel == null) {
+            return WooCommerceReason.CONNECTION_NOT_VERIFIED;
+        }
+        String current = targetFingerprint();
+        String verified = channel.getConnectionTargetFingerprint();
+        if (current == null || verified == null) {
+            return WooCommerceReason.CONNECTION_NOT_VERIFIED;
+        }
+        return current.equals(verified) ? null : WooCommerceReason.STORE_TARGET_CHANGED;
+    }
+
+    private String normalizedTarget() {
+        if (!credentialsConfigured()) {
+            return null;
+        }
+        try {
+            URI uri = new URI(baseUrl.trim());
+            String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
+            String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(Locale.ROOT);
+            int port = uri.getPort();
+            if (("https".equals(scheme) && port == 443) || ("http".equals(scheme) && port == 80)) {
+                port = -1;
+            }
+            String path = uri.getPath() == null ? "" : uri.getPath();
+            while (path.endsWith("/")) {
+                path = path.substring(0, path.length() - 1);
+            }
+            return scheme + "://" + host + (port < 0 ? "" : ":" + port) + path
+                    + "\n" + consumerKey.trim();
+        } catch (URISyntaxException ex) {
+            return null;
+        }
     }
 
     private boolean trustedDevelopmentHost(String host) {

@@ -58,9 +58,9 @@ public class WooCommerceChannelAdapter implements ChannelInventoryAdapter {
         Integer acknowledged = item.variationId() == null
                 ? client.updateProductStock(item.productId(), targetQuantity)
                 : client.updateVariationStock(item.productId(), item.variationId(), targetQuantity);
-        return new DeliveryReceipt(targetQuantity,
-                acknowledged == null ? targetQuantity : acknowledged,
-                reference(item));
+        // WooCommerce does not always echo stock_quantity in the PUT response. The target must
+        // never be copied into the acknowledgement: only the independent read-back proves it.
+        return new DeliveryReceipt(targetQuantity, acknowledged, reference(item));
     }
 
     @Override
@@ -155,19 +155,26 @@ public class WooCommerceChannelAdapter implements ChannelInventoryAdapter {
                     "WooCommerce connection has not been verified through the live API.");
         }
         String issue = properties.configurationIssue(channel);
-        if (issue == null) {
-            return;
+        if (issue != null) {
+            String message = switch (issue) {
+                case WooCommerceReason.DISABLED -> "WooCommerce connector is disabled.";
+                case WooCommerceReason.NOT_CONFIGURED -> "WooCommerce connector credentials are not configured.";
+                case WooCommerceReason.HTTP_TRUSTED_HOST_REQUIRED ->
+                        "WooCommerce over plain HTTP is only allowed for explicitly trusted development hosts.";
+                case WooCommerceReason.ENVIRONMENT_BLOCKED ->
+                        "WooCommerce inventory operations are limited to development/test channels.";
+                default -> "WooCommerce base URL is invalid.";
+            };
+            throw new ChannelAdapterException(ChannelAdapterException.Kind.UNAVAILABLE, issue, message);
         }
-        String message = switch (issue) {
-            case WooCommerceReason.DISABLED -> "WooCommerce connector is disabled.";
-            case WooCommerceReason.NOT_CONFIGURED -> "WooCommerce connector credentials are not configured.";
-            case WooCommerceReason.HTTP_TRUSTED_HOST_REQUIRED ->
-                    "WooCommerce over plain HTTP is only allowed for explicitly trusted development hosts.";
-            case WooCommerceReason.ENVIRONMENT_BLOCKED ->
-                    "WooCommerce inventory operations are limited to development/test channels.";
-            default -> "WooCommerce base URL is invalid.";
-        };
-        throw new ChannelAdapterException(ChannelAdapterException.Kind.UNAVAILABLE, issue, message);
+        String targetIssue = properties.storeTargetIssue(channel);
+        if (targetIssue != null) {
+            throw new ChannelAdapterException(ChannelAdapterException.Kind.UNAVAILABLE,
+                    targetIssue,
+                    WooCommerceReason.STORE_TARGET_CHANGED.equals(targetIssue)
+                            ? "The configured WooCommerce store changed since verification; reconnect and verify mappings again."
+                            : "WooCommerce connection is not bound to the configured store; verify it again.");
+        }
     }
 
     private String reference(WooCommerceApiClient.RemoteItem item) {

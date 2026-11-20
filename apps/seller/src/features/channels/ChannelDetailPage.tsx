@@ -11,6 +11,7 @@ import { ChannelWorkspaceTabs, isChannelWorkspaceTab, type ChannelWorkspaceTab }
 import { ChannelOverviewTab } from './components/ChannelOverviewTab';
 import { ChannelBrandIcon } from '../../components/common/ChannelBrandIcon';
 import { ChannelOrderIngestion, ChannelActivityHistory, ChannelCapabilitiesSettings } from './components/ChannelOperations';
+import { UnsupportedChannelFeature } from './components/UnsupportedChannelFeature';
 import { ChannelSettingsTab } from './components/ChannelSettingsTab';
 import { ShopifyCapabilityPanel } from './components/ShopifyCapabilityPanel';
 import { ShopifyIntegrationPanel } from './components/ShopifyIntegrationPanel';
@@ -292,10 +293,14 @@ export function ChannelDetailPage({ id, mode }: { id: string; mode: DemoMode }) 
           />
         )
       ) : null}
-      {!fixture && currentChannel && activeTab === 'orders' ? currentChannel.code === 'lazada'
+      {!fixture && currentChannel && activeTab === 'orders' ? currentChannel.code === 'woocommerce'
+        ? <UnsupportedChannelFeature channel={currentChannel} feature="Đơn hàng WooCommerce" />
+        : currentChannel.code === 'lazada'
         ? <LazadaOrdersPanel key={`${currentChannel.id}:${attempt}`} channelId={currentChannel.id} canManage={canManage} connected={currentChannel.status === 'connected'} />
         : <ChannelOrderIngestion key={`${currentChannel.id}:${attempt}`} channel={currentChannel} canManage={canManage} /> : null}
-      {!fixture && currentChannel && activeTab === 'history' ? <ChannelActivityHistory key={`${currentChannel.id}:${attempt}`} channel={currentChannel} /> : null}
+      {!fixture && currentChannel && activeTab === 'history' ? currentChannel.code === 'woocommerce'
+        ? <UnsupportedChannelFeature channel={currentChannel} feature="Lịch sử hoạt động WooCommerce" />
+        : <ChannelActivityHistory key={`${currentChannel.id}:${attempt}`} channel={currentChannel} /> : null}
       {!fixture && currentChannel && activeTab === 'settings' ? <div className="grid gap-5">
         {currentChannel.code === 'shopify' ? (
           <ShopifyIntegrationPanel canManage={canManage} channelId={currentChannel.id} onUpdated={refresh} />
@@ -307,7 +312,7 @@ export function ChannelDetailPage({ id, mode }: { id: string; mode: DemoMode }) 
           <ChannelSettingsTab key={`${currentChannel.id}:${attempt}`} channel={currentChannel} canManage={canManage} status={shopifyStatus} statusLoading={shopifyStatusLoading} statusError={shopifyStatusError} onStatusChange={setShopifyStatus} onUpdated={refresh} />
         )}
         {currentChannel.code === 'shopify' ? <ShopifyCapabilityPanel channelId={currentChannel.id} canManage={canManage} /> : null}
-        <ChannelCapabilitiesSettings channel={currentChannel} />
+        {currentChannel.code === 'woocommerce' ? null : <ChannelCapabilitiesSettings channel={currentChannel} />}
       </div> : null}
     </div>
   </ChannelWorkspaceFrame>;

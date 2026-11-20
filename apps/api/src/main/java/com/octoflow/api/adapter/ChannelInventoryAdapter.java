@@ -23,7 +23,12 @@ public interface ChannelInventoryAdapter {
 
     record RemoteStock(int quantity, long version, String reference) {}
 
-    record DeliveryReceipt(int sentQuantity, int acknowledgedQuantity, String reference) {}
+    /**
+     * {@code acknowledgedQuantity} is null when the channel accepted the write but did not echo a
+     * quantity back. A null acknowledgement is not proof of delivery: only an independent
+     * read-back may make the delivery VERIFIED.
+     */
+    record DeliveryReceipt(int sentQuantity, Integer acknowledgedQuantity, String reference) {}
 
     record MappingSnapshot(String externalSku, String externalVariantId,
                            int quantity, long version) {}

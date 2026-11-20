@@ -38,6 +38,10 @@ public final class WooCommerceMockStore implements AutoCloseable {
     public volatile Integer clampStockTo;
     public volatile long putDelayMs;
     public volatile boolean rejectProducts;
+    /** When true, a PUT succeeds but the response omits stock_quantity, like some WooCommerce setups. */
+    public volatile boolean omitStockQuantityOnPut;
+    /** When true, a PUT is applied but the response body is not valid JSON. */
+    public volatile boolean malformedPutResponse;
 
     private final HttpServer server;
     private final ExecutorService executor;
@@ -72,6 +76,8 @@ public final class WooCommerceMockStore implements AutoCloseable {
         clampStockTo = null;
         putDelayMs = 0;
         rejectProducts = false;
+        omitStockQuantityOnPut = false;
+        malformedPutResponse = false;
     }
 
     /**
@@ -111,7 +117,8 @@ public final class WooCommerceMockStore implements AutoCloseable {
                 return;
             }
             if ("/wp-json/wc/v3/products/101".equals(path)) {
-                if ("PUT".equals(method)) {
+                boolean put = "PUT".equals(method);
+                if (put) {
                     putCount.incrementAndGet();
                     String body = readBody(exchange);
                     lastPutBody = body;
@@ -125,7 +132,13 @@ public final class WooCommerceMockStore implements AutoCloseable {
                         completedPuts.incrementAndGet();
                     }
                 }
-                respond(exchange, 200, product());
+                // Only the PUT response may omit the field. A GET must still report the real
+                // stock, otherwise read-back could never prove the write.
+                if (put && malformedPutResponse) {
+                    respondRaw(exchange, 200, "{\"id\":101,");
+                } else {
+                    respond(exchange, 200, put && omitStockQuantityOnPut ? productWithoutStock() : product());
+                }
                 return;
             }
             if ("/wp-json/wc/v3/products/101/variations/202".equals(path)) {
@@ -168,6 +181,12 @@ public final class WooCommerceMockStore implements AutoCloseable {
         return node;
     }
 
+    private ObjectNode productWithoutStock() {
+        ObjectNode node = product();
+        node.remove("stock_quantity");
+        return node;
+    }
+
     private ObjectNode variation() {
         ObjectNode node = JSON.createObjectNode();
         node.put("id", 202);
@@ -191,7 +210,11 @@ public final class WooCommerceMockStore implements AutoCloseable {
     }
 
     private void respond(HttpExchange exchange, int status, JsonNode body) throws IOException {
-        byte[] payload = JSON.writeValueAsBytes(body);
+        respondRaw(exchange, status, JSON.writeValueAsString(body));
+    }
+
+    private void respondRaw(HttpExchange exchange, int status, String body) throws IOException {
+        byte[] payload = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json");
         exchange.sendResponseHeaders(status, payload.length);
         exchange.getResponseBody().write(payload);

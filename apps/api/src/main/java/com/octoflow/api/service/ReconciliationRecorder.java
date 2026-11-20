@@ -20,9 +20,13 @@ import java.util.Map;
 
 /**
  * Applies a reconciliation observation after the remote read has completed. The target is the
- * listing's allocated quota; a mismatch is recorded as drift and queues a correction job unless
- * an allocation step for the same listing is still in flight. A matching read also resolves an
- * earlier UNCONFIRMED job instead of retrying it blindly.
+ * listing's allocated quota; a mismatch is always recorded as drift with evidence.
+ *
+ * Only the simulator auto-queues a correction job. A real connector cannot explain an external
+ * stock change yet (order ingestion does not exist in this phase), so silently overwriting the
+ * store with the local quota would destroy inventory the operator has not accounted for. Live
+ * channels therefore surface drift for review and leave the listing OUT_OF_SYNC.
+ * A matching read also resolves an earlier UNCONFIRMED job instead of retrying it blindly.
  */
 @Service
 public class ReconciliationRecorder {
@@ -86,7 +90,8 @@ public class ReconciliationRecorder {
 
         resolveUncertainJobs(listing, target, remoteQuantity, remoteBefore, adapterName, reference);
 
-        if (!matches && !allocationInFlight(listing.getId()) && !currentTargetBlocked(listing)) {
+        if (!matches && autoCorrectionAllowed(adapterName)
+                && !allocationInFlight(listing.getId()) && !currentTargetBlocked(listing)) {
             jobRepository.supersedeActiveForListing(listing.getId(),
                     "Reconciliation found drift; queued a fresh correction.");
             SyncJob correction = new SyncJob();
@@ -142,6 +147,14 @@ public class ReconciliationRecorder {
                 jobRepository.save(job);
             }
         }
+    }
+
+    /**
+     * The simulator has no external stock movement, so a mismatch can only be a delivery defect
+     * and auto-correction is the intended Phase 04 behaviour. Real channels wait for an operator.
+     */
+    private boolean autoCorrectionAllowed(String adapterName) {
+        return "simulator".equalsIgnoreCase(adapterName);
     }
 
     private boolean allocationInFlight(Long listingId) {

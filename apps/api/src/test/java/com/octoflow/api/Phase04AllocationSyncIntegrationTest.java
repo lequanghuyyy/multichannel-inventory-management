@@ -313,18 +313,16 @@ class Phase04AllocationSyncIntegrationTest {
                 com.octoflow.api.entity.SimulatorFault.FaultType.TIMEOUT, 10, 0);
 
         assertTrue(allocationExecutionService.processPlan(plan.id()));
-        assertEquals("APPLYING", planStatus(plan.id()));
-        assertEquals("RETRY_PENDING", itemStatus(plan.id(), decreaseListing));
+        assertEquals("BLOCKED", planStatus(plan.id()),
+                "a timeout during the decrease write is uncertain and must block immediately");
+        assertEquals("BLOCKED", itemStatus(plan.id(), decreaseListing));
         assertEquals("PENDING", itemStatus(plan.id(), increaseListing));
         assertEquals(1, evidenceForPlan(plan.id()).stream()
                 .filter(row -> "TIMEOUT".equals(row.get("error_code")))
                 .count());
 
-        Thread.sleep(30);
-        assertTrue(allocationExecutionService.processPlan(plan.id()));
-        assertEquals("BLOCKED", planStatus(plan.id()));
-        assertEquals("BLOCKED", itemStatus(plan.id(), decreaseListing));
-        assertEquals("PENDING", itemStatus(plan.id(), increaseListing));
+        assertFalse(allocationExecutionService.processPlan(plan.id()),
+                "the same uncertain write must never be retried automatically");
 
         assertEquals(5, quota(decreaseListing), "an uncertain remote result must never be treated as applied");
         assertEquals(0, quota(increaseListing));

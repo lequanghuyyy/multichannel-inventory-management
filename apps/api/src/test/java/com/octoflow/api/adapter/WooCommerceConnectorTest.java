@@ -206,6 +206,49 @@ class WooCommerceConnectorTest {
         assertEquals(WooCommerceReason.HTTP_TRUSTED_HOST_REQUIRED, failure.getReasonCode());
     }
 
+    @Test
+    void putResponseWithoutStockQuantityIsNotAnAcknowledgement() {
+        store.omitStockQuantityOnPut = true;
+        ChannelListing listing = listing("101", null, "WOO-SKU-A");
+
+        ChannelInventoryAdapter.DeliveryReceipt receipt =
+                adapter.writeStock(channel(), listing, 11, "phase06:no-ack");
+
+        assertEquals(11, receipt.sentQuantity());
+        assertNull(receipt.acknowledgedQuantity(),
+                "an omitted PUT field must stay null; the target is never copied into it");
+        assertEquals(11, store.stock);
+        assertEquals(1, store.putCount.get());
+    }
+
+    @Test
+    void unreadablePutResponseIsUncertainInsteadOfRetryable() {
+        store.malformedPutResponse = true;
+        ChannelListing listing = listing("101", null, "WOO-SKU-A");
+
+        ChannelAdapterException failure = assertThrows(ChannelAdapterException.class,
+                () -> adapter.writeStock(channel(), listing, 11, "phase06:bad-json"));
+
+        assertEquals(ChannelAdapterException.Kind.TIMEOUT, failure.getKind(),
+                "the write may have landed; it must not be classified as a safe-to-retry refusal");
+        assertEquals(WooCommerceReason.INVALID_RESPONSE, failure.getReasonCode());
+        assertEquals(11, store.stock, "the mutation did reach the store");
+        assertEquals(1, store.putCount.get());
+    }
+
+    @Test
+    void changedStoreTargetInvalidatesTheVerifiedConnectionBeforeAnyHttp() {
+        Channel channel = channel();
+        properties.setBaseUrl("http://127.0.0.1:1");
+
+        ChannelAdapterException failure = assertThrows(ChannelAdapterException.class,
+                () -> adapter.readStock(channel, listing("101", null, "WOO-SKU-A")));
+
+        assertEquals(ChannelAdapterException.Kind.UNAVAILABLE, failure.getKind());
+        assertEquals(WooCommerceReason.STORE_TARGET_CHANGED, failure.getReasonCode());
+        assertEquals(0, store.productReads.get());
+    }
+
     private Channel channel() {
         Channel channel = new Channel();
         channel.setCode("woocommerce");
@@ -214,6 +257,7 @@ class WooCommerceConnectorTest {
         channel.setStatus(Channel.Status.CONNECTED);
         channel.setConnectorName("woocommerce");
         channel.setConnectionVerifiedAt(Instant.now());
+        channel.setConnectionTargetFingerprint(properties.targetFingerprint());
         return channel;
     }
 

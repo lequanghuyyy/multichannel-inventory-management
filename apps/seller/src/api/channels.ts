@@ -271,6 +271,7 @@ function toMapping(listing: ServerListing, channelId: string, sku?: string): Cha
   const revision = listing.target_allocation_revision ?? 0;
   const latestSync = syncStatus(listing.sync_status);
   const drifted = latestSync === 'MISMATCH' || latestSync === 'BLOCKED';
+  const neverSent = (listing.sent_quantity ?? null) === null && (listing.verified_quantity ?? null) === null;
   return {
     id: requireId(listing.id, 'ánh xạ kênh'),
     channel_id: String(listing.channel_id ?? channelId),
@@ -301,9 +302,13 @@ function toMapping(listing: ServerListing, channelId: string, sku?: string): Cha
     latest_sync_requested_available: listing.sent_quantity ?? null,
     latest_sync_remote_after: listing.verified_quantity ?? null,
     latest_sync_target_version: revision,
-    latest_sync_mutation_acknowledged: listing.acknowledged_quantity !== null && listing.acknowledged_quantity !== undefined,
+    // Absence is not a refusal: WooCommerce may accept a write without echoing stock_quantity.
+    // Keep null so the UI cannot claim a mutation was rejected when no acknowledgement arrived.
+    latest_sync_mutation_acknowledged: listing.acknowledged_quantity === null || listing.acknowledged_quantity === undefined
+      ? null
+      : true,
     drifted,
-    push_state: latestSync === 'VERIFIED' ? 'current' : drifted ? 'superseded' : 'unknown',
+    push_state: latestSync === 'VERIFIED' ? 'current' : neverSent ? 'never' : drifted ? 'superseded' : 'unknown',
   };
 }
 

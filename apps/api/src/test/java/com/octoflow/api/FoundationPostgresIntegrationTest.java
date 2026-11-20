@@ -130,7 +130,7 @@ class FoundationPostgresIntegrationTest {
 
     @Test
     void cleanPostgresRunsAllMigrationsAndJPAValidatesTheSchema() {
-        assertEquals(10, flyway.info().applied().length);
+        assertEquals(11, flyway.info().applied().length);
         assertTrue(jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'idempotency_records'", Integer.class) == 1);
         assertTrue(jdbcTemplate.queryForObject(

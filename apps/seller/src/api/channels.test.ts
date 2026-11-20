@@ -128,6 +128,44 @@ describe('api/channels', () => {
     expect(page.items[0]?.core_on_hand).toBeNull();
   });
 
+  it('maps the live listing statuses and never invents an acknowledgement', async () => {
+    const live = {
+      id: 41,
+      channel_id: 7,
+      variant_id: 11,
+      sku: 'P06-SKU-A',
+      external_listing_id: '101',
+      external_sku: 'WOO-SKU-A',
+      external_variant_id: null,
+      mapping_status: 'VERIFIED',
+      mapping_verified_at: '2026-10-27T05:00:00Z',
+      active: true,
+      allocated_quota: 8,
+      reported_stock: 8,
+      sync_status: 'SYNCED',
+      sent_quantity: 8,
+      acknowledged_quantity: null,
+      verified_quantity: 8,
+      last_sync_error: null,
+      last_verified_at: '2026-10-27T05:00:00Z',
+      target_allocation_revision: 3,
+      updated_at: '2026-10-27T05:00:00Z',
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => json([live])));
+
+    const row = (await listChannelMappings(channel.id)).items[0];
+
+    expect(row?.latest_sync_status).toBe('VERIFIED');
+    expect(row?.push_state).toBe('current');
+    expect(row?.target_quantity).toBe(8);
+    expect(row?.pushed_quantity).toBe(8);
+    expect(row?.acknowledged_quantity).toBeNull();
+    expect(row?.verified_quantity).toBe(8);
+    expect(row?.latest_sync_verified_at).toBe('2026-10-27T05:00:00Z');
+    // A missing PUT acknowledgement is unknown, not a refusal.
+    expect(row?.latest_sync_mutation_acknowledged).toBeNull();
+  });
+
   it('carries the HTTP status on a typed error so a 404 is not mistaken for an outage', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json(
       { error: { code: 'CHANNEL_NOT_FOUND', message: 'Channel was not found', request_id: 'req-1' } },

@@ -1,9 +1,11 @@
 package com.octoflow.api.service;
 
 import com.octoflow.api.adapter.WooCommerceApiClient;
+import com.octoflow.api.adapter.WooCommerceReason;
 import com.octoflow.api.config.WooCommerceProperties;
 import com.octoflow.api.dto.response.WooCommerceChannelStatusResponse;
 import com.octoflow.api.entity.Channel;
+import com.octoflow.api.entity.ChannelListing;
 import com.octoflow.api.exception.ErrorCode;
 import com.octoflow.api.exception.ResourceNotFoundException;
 import com.octoflow.api.repository.ChannelListingRepository;
@@ -12,6 +14,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.List;
+import java.util.Objects;
 
 /**
  * Persists a completed WooCommerce connection check. Remote I/O happens in the service before
@@ -38,12 +42,19 @@ public class WooCommerceConnectionRecorder {
     public WooCommerceChannelStatusResponse applyVerified(Long channelId,
                                                           WooCommerceApiClient.ConnectionSnapshot snapshot) {
         Channel channel = lock(channelId);
+        String targetFingerprint = properties.targetFingerprint();
+        // A null previous fingerprint means this connection predates target binding (pre-V11), so
+        // its mappings were verified without proof of which store they belong to. Treat the first
+        // binding like a target change: require the mappings to be verified again.
+        boolean targetChanged = targetFingerprint != null
+                && !Objects.equals(channel.getConnectionTargetFingerprint(), targetFingerprint);
         channel.setStatus(Channel.Status.CONNECTED);
         channel.setConnectorName("woocommerce");
         channel.setConnectorVersion(WooCommerceProperties.API_VERSION);
         channel.setConnectionVerifiedAt(Instant.now());
         channel.setConnectionProductsRead(snapshot.productsRead());
         channel.setConnectionAuthMode(snapshot.authMode());
+        channel.setConnectionTargetFingerprint(targetFingerprint);
         channel.setExternalStoreName(truncate(snapshot.site() == null ? null : snapshot.site().name(), 255));
         channel.setExternalStoreUrl(truncate(snapshot.site() == null ? null : snapshot.site().url(), 512));
         channel.setExternalWcVersion(truncate(snapshot.wcVersion(), 64));
@@ -51,6 +62,11 @@ public class WooCommerceConnectionRecorder {
         channel.setExternalCurrency(truncate(snapshot.currency(), 8));
         channel.setConnectionLastErrorCode(null);
         channel.setConnectionLastErrorMessage(null);
+        if (targetChanged) {
+            // The live check reached a different store. Mappings verified against the old store
+            // cannot be trusted even if their numeric ids happen to exist in the new one.
+            invalidateMappings(channel, "Store target changed; verify this mapping again.");
+        }
         return status(channel);
     }
 
@@ -60,6 +76,9 @@ public class WooCommerceConnectionRecorder {
         channel.setStatus(Channel.Status.ERROR);
         channel.setConnectorName("woocommerce");
         channel.setConnectorVersion(WooCommerceProperties.API_VERSION);
+        // A failed check proves nothing about the store: withdraw the previous proof without
+        // erasing the fingerprint, so a later successful check can still detect a target change.
+        channel.setConnectionVerifiedAt(null);
         channel.setConnectionProductsRead(false);
         channel.setConnectionLastErrorCode(truncate(errorCode, 64));
         channel.setConnectionLastErrorMessage(truncate(sanitize(message), MAX_ERROR));
@@ -75,6 +94,7 @@ public class WooCommerceConnectionRecorder {
         channel.setConnectionVerifiedAt(null);
         channel.setConnectionProductsRead(false);
         channel.setConnectionAuthMode(null);
+        channel.setConnectionTargetFingerprint(null);
         channel.setExternalStoreName(null);
         channel.setExternalStoreUrl(null);
         channel.setExternalWcVersion(null);
@@ -93,10 +113,20 @@ public class WooCommerceConnectionRecorder {
     private WooCommerceChannelStatusResponse status(Channel channel) {
         boolean environmentAllowed = properties.environmentAllowed(channel);
         boolean connected = channel.getStatus() == Channel.Status.CONNECTED;
+        String targetIssue = properties.storeTargetIssue(channel);
         boolean verified = connected && channel.getConnectionVerifiedAt() != null
-                && "woocommerce".equals(channel.getConnectorName());
+                && "woocommerce".equals(channel.getConnectorName())
+                && targetIssue == null;
         boolean readAvailable = verified && properties.readAvailable(channel);
         boolean writeAvailable = verified && properties.writeAvailable(channel);
+        // Only a still-present proof can be invalidated by a target change. A channel whose last
+        // verification failed has no proof left, so its classified failure is the useful error;
+        // replacing it with "not verified" would hide an auth/network problem behind a tautology.
+        boolean staleProof = targetIssue != null && channel.getConnectionVerifiedAt() != null;
+        String lastErrorCode = staleProof ? targetIssue : channel.getConnectionLastErrorCode();
+        String lastErrorMessage = staleProof
+                ? targetIssueMessage(targetIssue)
+                : channel.getConnectionLastErrorMessage();
         return new WooCommerceChannelStatusResponse(
                 channel.getId(),
                 channel.getCode(),
@@ -127,9 +157,31 @@ public class WooCommerceConnectionRecorder {
                         channel.getId(), com.octoflow.api.entity.ChannelListing.SyncStatus.OUT_OF_SYNC),
                 listingRepository.countByChannelIdAndSyncStatus(
                         channel.getId(), com.octoflow.api.entity.ChannelListing.SyncStatus.ERROR),
-                channel.getConnectionLastErrorCode(),
-                channel.getConnectionLastErrorMessage(),
+                lastErrorCode,
+                lastErrorMessage,
                 Instant.now());
+    }
+
+    private void invalidateMappings(Channel channel, String message) {
+        List<ChannelListing> listings = listingRepository.findByChannelId(channel.getId());
+        if (listings.isEmpty()) {
+            return;
+        }
+        for (ChannelListing listing : listings) {
+            listing.setMappingStatus(ChannelListing.MappingStatus.UNVERIFIED);
+            listing.setMappingVerifiedAt(null);
+            listing.setSyncStatus(ChannelListing.SyncStatus.UNVERIFIED);
+            listing.setLastSyncError(message);
+        }
+        listingRepository.saveAll(listings);
+    }
+
+    private String targetIssueMessage(String issue) {
+        return switch (issue) {
+            case WooCommerceReason.STORE_TARGET_CHANGED ->
+                    "Configured store target differs from the verified connection; reconnect and verify mappings again.";
+            default -> "This connection is not bound to the configured store; verify the connection again.";
+        };
     }
 
     private Channel lock(Long channelId) {

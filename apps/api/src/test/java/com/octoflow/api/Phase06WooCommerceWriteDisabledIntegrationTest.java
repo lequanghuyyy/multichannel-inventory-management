@@ -168,10 +168,13 @@ class Phase06WooCommerceWriteDisabledIntegrationTest {
         assertEquals(6, STORE.stock);
 
         Long correctionId = jdbcTemplate.queryForObject(
-                "SELECT id FROM sync_jobs WHERE listing_id = ? ORDER BY id DESC LIMIT 1",
+                "SELECT COUNT(*) FROM sync_jobs WHERE listing_id = ?",
                 Long.class, listingId);
-        processJobsUntil(correctionId, "BLOCKED");
-        assertEquals(0, STORE.putCount.get(), "the queued correction must also fail closed");
+        assertEquals(0L, correctionId,
+                "a real connector records drift for review; order ingestion does not exist yet");
+        syncJobDispatchService.processDueJobs();
+        assertEquals(0, STORE.putCount.get(), "no hidden correction may write the store");
+        assertEquals(6, STORE.stock);
     }
 
     private static WooCommerceMockStore startStore() {

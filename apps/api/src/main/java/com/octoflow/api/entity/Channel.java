@@ -62,6 +62,10 @@ public class Channel extends BaseEntity {
     @Column(name = "connection_last_error_message", length = 500)
     private String connectionLastErrorMessage;
 
+    /** Non-secret SHA-256 binding of the store target that was actually verified. */
+    @Column(name = "connection_target_fingerprint", length = 64)
+    private String connectionTargetFingerprint;
+
     @OneToMany(mappedBy = "channel", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<ChannelListing> listings = new ArrayList<>();
 
@@ -203,6 +207,14 @@ public class Channel extends BaseEntity {
 
     public void setConnectionLastErrorMessage(String connectionLastErrorMessage) {
         this.connectionLastErrorMessage = connectionLastErrorMessage;
+    }
+
+    public String getConnectionTargetFingerprint() {
+        return connectionTargetFingerprint;
+    }
+
+    public void setConnectionTargetFingerprint(String connectionTargetFingerprint) {
+        this.connectionTargetFingerprint = connectionTargetFingerprint;
     }
 
     public List<ChannelListing> getListings() {

@@ -20,6 +20,10 @@ public final class WooCommerceReason {
     public static final String HTTP_ERROR = "WOO_HTTP_ERROR";
     public static final String TIMEOUT = "WOO_TIMEOUT";
     public static final String CONNECTION_FAILED = "WOO_CONNECTION_FAILED";
+    /** The connection failed after the request may have been sent; read back before retrying. */
+    public static final String CONNECTION_LOST = "WOO_CONNECTION_LOST";
+    /** A re-verification bound the channel to a different store target; reconnect and re-verify mappings. */
+    public static final String STORE_TARGET_CHANGED = "WOO_STORE_TARGET_CHANGED";
     public static final String INVALID_RESPONSE = "WOO_INVALID_RESPONSE";
     public static final String PRODUCT_ID_INVALID = "WOO_PRODUCT_ID_INVALID";
     public static final String VARIATION_ID_INVALID = "WOO_VARIATION_ID_INVALID";

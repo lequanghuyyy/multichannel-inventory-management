@@ -194,7 +194,7 @@ public class SyncJobProcessor {
 
     @Transactional
     public void completeSuccess(SyncJobSnapshot snapshot, int remoteBefore,
-                                int sent, int acknowledged, int verified) {
+                                int sent, Integer acknowledged, int verified) {
         ChannelListing listing = listingRepository.findByIdForUpdate(snapshot.listingId()).orElse(null);
         SyncJob job = jobRepository.findByIdForUpdate(snapshot.jobId()).orElse(null);
         if (!ownedAndProcessing(job, claimOf(snapshot))) {
@@ -514,6 +514,7 @@ public class SyncJobProcessor {
         copy.setConnectionVerifiedAt(channel.getConnectionVerifiedAt());
         copy.setConnectionProductsRead(channel.isConnectionProductsRead());
         copy.setConnectionAuthMode(channel.getConnectionAuthMode());
+        copy.setConnectionTargetFingerprint(channel.getConnectionTargetFingerprint());
         return copy;
     }
 

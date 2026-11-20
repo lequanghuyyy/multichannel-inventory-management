@@ -77,12 +77,14 @@ public class AllocationExecutionService {
         try {
             adapter = adapterRouter.require(action.channel());
         } catch (ChannelAdapterException ex) {
-            processor.applyFailure(action, ex.getKind(), ex.reasonCodeOrKind(), ex.getMessage());
+            processor.applyFailure(action, ex.getKind(), ex.reasonCodeOrKind(), ex.getMessage(), false);
             return true;
         }
 
+        boolean writeAttempted = false;
         try {
             ChannelInventoryAdapter.RemoteStock before = adapter.readStock(action.channel(), action.listing());
+            writeAttempted = true;
             ChannelInventoryAdapter.DeliveryReceipt receipt = adapter.writeStock(
                     action.channel(), action.listing(), action.targetQuantity(), action.idempotencyReference());
             ChannelInventoryAdapter.RemoteStock after = adapter.readStock(action.channel(), action.listing());
@@ -94,11 +96,11 @@ public class AllocationExecutionService {
             processor.applySuccess(action, before.quantity(),
                     receipt.sentQuantity(), receipt.acknowledgedQuantity(), after.quantity());
         } catch (ChannelAdapterException ex) {
-            processor.applyFailure(action, ex.getKind(), ex.reasonCodeOrKind(), ex.getMessage());
+            processor.applyFailure(action, ex.getKind(), ex.reasonCodeOrKind(), ex.getMessage(), writeAttempted);
         } catch (RuntimeException ex) {
             processor.applyFailure(action, ChannelAdapterException.Kind.PROTOCOL,
                     ChannelAdapterException.Kind.PROTOCOL.name(),
-                    "Unexpected adapter error: " + ex.getMessage());
+                    "Unexpected adapter error: " + ex.getMessage(), writeAttempted);
         }
         return true;
     }

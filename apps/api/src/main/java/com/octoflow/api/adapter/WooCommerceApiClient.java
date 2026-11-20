@@ -9,10 +9,14 @@ import org.springframework.stereotype.Component;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
@@ -153,9 +157,22 @@ public class WooCommerceApiClient {
         } catch (JsonProcessingException ex) {
             throw invalidResponse("Could not encode the stock update.", ex);
         }
-        JsonNode node = executeJson("PUT", path, body, true);
-        requireObject(node, "stock update");
-        return integer(node, "stock_quantity");
+        try {
+            JsonNode node = executeJson("PUT", path, body, true);
+            requireObject(node, "stock update");
+            return integer(node, "stock_quantity");
+        } catch (ChannelAdapterException ex) {
+            if (ex.getKind() == ChannelAdapterException.Kind.PROTOCOL) {
+                // The request was sent and the store answered, but its answer cannot be read.
+                // The mutation may have been applied; only a read-back can decide, so never
+                // let this look like a retryable "request was not sent" failure.
+                throw new ChannelAdapterException(ChannelAdapterException.Kind.TIMEOUT,
+                        ex.reasonCodeOrKind(),
+                        "WooCommerce accepted the stock update but its response could not be read; "
+                                + "the remote result is uncertain until it is read back.", ex);
+            }
+            throw ex;
+        }
     }
 
     private JsonNode optionalSystemStatus() {
@@ -209,6 +226,12 @@ public class WooCommerceApiClient {
         HttpResponse<String> response;
         try {
             response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        } catch (HttpConnectTimeoutException ex) {
+            // No TCP/TLS connection was established, so a PUT can never have reached the store.
+            throw new ChannelAdapterException(ChannelAdapterException.Kind.REFUSED,
+                    WooCommerceReason.CONNECTION_FAILED,
+                    "WooCommerce did not accept a connection within " + properties.getConnectTimeoutMs()
+                            + " ms; no request was sent.", ex);
         } catch (HttpTimeoutException ex) {
             throw new ChannelAdapterException(ChannelAdapterException.Kind.TIMEOUT,
                     WooCommerceReason.TIMEOUT,
@@ -219,10 +242,17 @@ public class WooCommerceApiClient {
             throw new ChannelAdapterException(ChannelAdapterException.Kind.TIMEOUT,
                     WooCommerceReason.TIMEOUT,
                     "The WooCommerce call was interrupted; the remote result is uncertain.", ex);
-        } catch (IOException ex) {
+        } catch (ConnectException | UnknownHostException | NoRouteToHostException ex) {
+            // Definitely refused before any bytes were written: a retry cannot duplicate a write.
             throw new ChannelAdapterException(ChannelAdapterException.Kind.REFUSED,
                     WooCommerceReason.CONNECTION_FAILED,
-                    "WooCommerce is unreachable; check the store URL and network.", ex);
+                    "WooCommerce is unreachable; check the store URL and network. No request was sent.", ex);
+        } catch (IOException ex) {
+            // A reset/handshake failure can happen after the request body left this process. The
+            // write may have been applied, so the caller must read back before retrying it.
+            throw new ChannelAdapterException(ChannelAdapterException.Kind.TIMEOUT,
+                    WooCommerceReason.CONNECTION_LOST,
+                    "The WooCommerce connection was lost; the remote result is uncertain until it is read back.", ex);
         }
 
         int status = response.statusCode();
@@ -254,6 +284,13 @@ public class WooCommerceApiClient {
             return new ChannelAdapterException(ChannelAdapterException.Kind.REFUSED,
                     WooCommerceReason.RATE_LIMITED,
                     "WooCommerce rate limit was reached (HTTP 429)." + suffix);
+        }
+        if (status == 408 || status >= 500) {
+            // The store answered, but it may have applied the mutation before failing. Treat it
+            // as uncertain so no caller retries the PUT before an independent read-back.
+            return new ChannelAdapterException(ChannelAdapterException.Kind.TIMEOUT,
+                    WooCommerceReason.HTTP_ERROR,
+                    "WooCommerce returned HTTP " + status + "; the remote result is uncertain." + suffix);
         }
         return new ChannelAdapterException(ChannelAdapterException.Kind.REFUSED,
                 WooCommerceReason.HTTP_ERROR,

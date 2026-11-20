@@ -190,6 +190,30 @@ describe('ChannelDetailPage · live API', () => {
     expect(ledger).toHaveTextContent('Có');
   });
 
+  it('renders a real SYNCED WooCommerce row without a legacy core version', () => {
+    render(<ChannelApiMappingLedger woocommerce mappings={[{
+      id: 'm-woo-synced', channel_id: '30000000-0000-4000-8000-000000000004',
+      variant_id: 'v-woo', external_sku: 'WOO-SKU-A', canonical_sku: 'P06-SKU-A',
+      listed: true, variant_is_active: true, inventory_tracking_enabled: true,
+      mapping_status: 'verified', pushed_version: 3, target_version: 3, target_quantity: 8,
+      pushed_quantity: 8, acknowledged_quantity: null, verified_quantity: 8,
+      reported_quantity: 8, drifted: false, push_state: 'current', quantity_basis: 'ats',
+      latest_sync_status: 'VERIFIED', latest_sync_verified_at: '2026-10-27T05:00:00Z',
+      latest_sync_attempt_at: '2026-10-27T05:00:00Z',
+      latest_sync_requested_available: 8, latest_sync_remote_after: 8,
+      latest_sync_target_version: 3, latest_sync_mutation_acknowledged: null,
+    }]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Chi tiết mapping' }));
+    const ledger = screen.getByRole('table');
+    expect(ledger).toHaveTextContent('VERIFIED · Đã xác minh từ WooCommerce');
+    expect(ledger).not.toHaveTextContent('Phân bổ tồn kho đã cũ');
+    expect(ledger).toHaveTextContent('Mục tiêu / đã gửi / đã xác nhận / đọc lại');
+    expect(ledger).toHaveTextContent('8 / 8 / — / 8');
+    // No PUT acknowledgement was echoed: the panel must say "unknown", not "Không".
+    expect(ledger).toHaveTextContent('WooCommerce nhận mutation');
+  });
+
   it('does not call an old Shopify report verified without evidence', async () => {
     render(<ChannelApiMappingLedger shopify mappings={[{
       id: 'm-shopify-old', channel_id: '30000000-0000-4000-8000-000000000001',

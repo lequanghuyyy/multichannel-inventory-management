@@ -15,6 +15,8 @@ import com.octoflow.api.entity.ProductVariant;
 import com.octoflow.api.exception.ApiException;
 import com.octoflow.api.exception.BusinessRuleException;
 import com.octoflow.api.exception.ErrorCode;
+import com.octoflow.api.config.WooCommerceProperties;
+import com.octoflow.api.adapter.WooCommerceReason;
 import com.octoflow.api.repository.ProductRepository;
 import com.octoflow.api.repository.ProductVariantRepository;
 import com.octoflow.api.service.AllocationExecutionService;
@@ -112,6 +114,7 @@ class Phase06WooCommerceIntegrationTest {
     @Autowired SyncJobDispatchService syncJobDispatchService;
     @Autowired SyncJobManagementService syncJobManagementService;
     @Autowired ReconciliationService reconciliationService;
+    @Autowired WooCommerceProperties wooCommerceProperties;
 
     @BeforeEach
     void reset() {
@@ -570,6 +573,163 @@ class Phase06WooCommerceIntegrationTest {
         syncJobDispatchService.processDueJobs();
         assertEquals(0, STORE.putCount.get());
         assertEquals(19, STORE.stock);
+    }
+
+    @Test
+    void putResponseWithoutStockQuantityKeepsAcknowledgementNullAndVerifiesByReadBack() throws Exception {
+        Long channelId = verifiedChannel();
+        Fixture fixture = fixture(20);
+        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
+        setQuota(listingId, 8);
+        STORE.omitStockQuantityOnPut = true;
+
+        inventoryService.adjustInventory(
+                new InventoryAdjustRequest(fixture.sku(), 1, "phase06 missing ack", null),
+                "phase06-no-ack-" + UUID.randomUUID());
+        dispatchOutboxUntilIdle(fixture.variantId());
+        Long jobId = latestJobId(listingId);
+        processJobsUntil(jobId, "VERIFIED");
+
+        assertEquals(1, STORE.putCount.get());
+        assertEquals(8, STORE.stock, "the independent read-back proves the write");
+
+        Map<String, Object> job = jobRow(jobId);
+        assertEquals("VERIFIED", job.get("status"));
+        assertEquals(8, intValue(job, "sent_quantity"));
+        assertNull(job.get("acknowledged_quantity"),
+                "a missing PUT response field is not proof and must not be filled with the target");
+        assertEquals(8, intValue(job, "verified_quantity"));
+
+        Map<String, Object> listing = listingRow(listingId);
+        assertEquals("SYNCED", listing.get("sync_status"));
+        assertNull(listing.get("acknowledged_quantity"));
+        assertEquals(8, intValue(listing, "verified_quantity"));
+
+        Map<String, Object> evidence = evidenceForListing(listingId).stream()
+                .filter(row -> "INVENTORY_SYNC".equals(row.get("kind")))
+                .findFirst().orElseThrow();
+        assertEquals("VERIFIED", evidence.get("status"));
+        assertNull(evidence.get("acknowledged_quantity"));
+        assertEquals(8, intValue(evidence, "verified_quantity"));
+    }
+
+    @Test
+    void realConnectorDriftIsRecordedForReviewWithoutAutoCorrection() {
+        Long channelId = verifiedChannel();
+        Fixture fixture = fixture(10);
+        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
+        setQuota(listingId, 8);
+        STORE.stock = 5;
+
+        ChannelSyncEvidenceResponse observed = reconciliationService.reconcileListing(channelId, listingId);
+
+        assertEquals("DRIFT", observed.status());
+        assertEquals(8, observed.targetQuantity());
+        assertEquals(5, observed.verifiedQuantity());
+        assertEquals("OUT_OF_SYNC", listingRow(listingId).get("sync_status"));
+        assertEquals(0, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM sync_jobs", Integer.class),
+                "WooCommerce drift needs operator review; order ingestion does not exist yet");
+        assertEquals(0, STORE.putCount.get());
+
+        syncJobDispatchService.processDueJobs();
+        assertEquals(0, STORE.putCount.get(), "no hidden correction may write the store");
+        assertEquals(5, STORE.stock);
+    }
+
+    @Test
+    void allocationWriteTimeoutBlocksImmediatelyAndIsNeverRetried() {
+        Long channelId = verifiedChannel();
+        Fixture fixture = fixture(20);
+        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
+        STORE.stock = 19;
+        STORE.putDelayMs = 2_000;
+
+        AllocationPlanResponse plan = allocationService.preview(new AllocationPreviewRequest(
+                fixture.sku(),
+                List.of(new AllocationPreviewRequest.AllocationTargetRequest(listingId, 8))));
+        allocationService.confirm(plan.id(), "phase06-alloc-timeout-" + UUID.randomUUID());
+        assertTrue(allocationExecutionService.processPlan(plan.id()));
+
+        assertEquals("BLOCKED", allocationService.get(plan.id()).status(),
+                "an uncertain write must not be retried automatically");
+        assertEquals(0, quota(listingId));
+        Map<String, Object> item = jdbcTemplate.queryForMap("""
+                SELECT status, proposed_quota, sent_quantity, acknowledged_quantity, verified_quantity
+                FROM allocation_plan_items WHERE plan_id = ?
+                """, plan.id());
+        assertEquals("BLOCKED", item.get("status"));
+        assertNull(item.get("sent_quantity"));
+        assertNull(item.get("acknowledged_quantity"));
+
+        Map<String, Object> evidence = evidenceForListing(listingId).stream()
+                .filter(row -> "ALLOCATION_INCREASE".equals(row.get("kind")))
+                .findFirst().orElseThrow();
+        assertEquals("UNCONFIRMED", evidence.get("status"));
+        assertEquals("WOO_TIMEOUT", evidence.get("error_code"));
+
+        assertFalse(allocationExecutionService.processPlan(plan.id()));
+        assertEquals(1, STORE.putCount.get());
+        assertTrue(STORE.awaitCompletedPuts(1, 5_000));
+        assertEquals(8, STORE.stock, "the delayed write may have landed; only read-back can decide");
+        assertEquals(0, quota(listingId), "an uncertain write must not change the published quota");
+    }
+
+    @Test
+    void changedStoreTargetRequiresReconnectAndInvalidatesOldMappings() throws Exception {
+        Long channelId = verifiedChannel();
+        Fixture fixture = fixture(20);
+        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
+
+        String originalBaseUrl = wooCommerceProperties.getBaseUrl();
+        try (WooCommerceMockStore otherStore = new WooCommerceMockStore()) {
+            wooCommerceProperties.setBaseUrl(otherStore.baseUrl());
+
+            WooCommerceChannelStatusResponse stale = wooCommerceChannelService.status(channelId);
+            assertFalse(stale.connectionVerified(),
+                    "a proof bound to another store must not survive a URL change");
+            assertFalse(stale.readAvailable());
+            assertFalse(stale.inventoryWriteAvailable());
+            assertEquals(WooCommerceReason.STORE_TARGET_CHANGED, stale.lastErrorCode());
+
+            ApiException blocked = assertThrows(ApiException.class,
+                    () -> channelService.verifyMapping(channelId, listingId, null));
+            assertEquals(ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE, blocked.getErrorCode());
+            assertTrue(blocked.getMessage().contains(WooCommerceReason.STORE_TARGET_CHANGED));
+            assertEquals(0, otherStore.productReads.get(), "the target gate must run before HTTP");
+
+            WooCommerceChannelStatusResponse reconnected = wooCommerceChannelService.verify(channelId);
+            assertTrue(reconnected.connectionVerified());
+            Map<String, Object> mapping = listingRow(listingId);
+            assertEquals("UNVERIFIED", mapping.get("mapping_status"),
+                    "mappings verified against the old store must be re-verified");
+            assertNull(mapping.get("mapping_verified_at"));
+        } finally {
+            wooCommerceProperties.setBaseUrl(originalBaseUrl);
+        }
+    }
+
+    @Test
+    void preV11MappingMustBeReverifiedOnFirstBoundConnectionCheck() {
+        Long channelId = verifiedChannel();
+        Fixture fixture = fixture(20);
+        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
+
+        // Rows written before V11 have no target fingerprint. Their mapping proof cannot be tied
+        // to the store configured now, so it must not survive the first bound verification.
+        jdbcTemplate.update("UPDATE channels SET connection_target_fingerprint = NULL WHERE id = ?", channelId);
+
+        WooCommerceChannelStatusResponse stale = wooCommerceChannelService.status(channelId);
+        assertFalse(stale.connectionVerified());
+        assertFalse(stale.readAvailable());
+        assertEquals(WooCommerceReason.CONNECTION_NOT_VERIFIED, stale.lastErrorCode());
+
+        WooCommerceChannelStatusResponse reconnected = wooCommerceChannelService.verify(channelId);
+        assertTrue(reconnected.connectionVerified());
+        Map<String, Object> mapping = listingRow(listingId);
+        assertEquals("UNVERIFIED", mapping.get("mapping_status"),
+                "a mapping verified without a target fingerprint must be re-verified");
+        assertNull(mapping.get("mapping_verified_at"));
+        assertEquals("UNVERIFIED", mapping.get("sync_status"));
     }
 
     // ------------------------------------------------------------------

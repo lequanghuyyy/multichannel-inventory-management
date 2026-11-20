@@ -62,7 +62,9 @@ public class ChannelAdapterRouter {
         if (simulatorEnabled && isSimulatorChannel(channel)) {
             return true;
         }
-        return isWooCommerceChannel(channel) && wooCommerceProperties.writeAvailable(channel);
+        return isWooCommerceChannel(channel)
+                && connectionBound(channel)
+                && wooCommerceProperties.writeAvailable(channel);
     }
 
     /** True when the channel can be read or verified, even with inventory writes disabled. */
@@ -70,7 +72,20 @@ public class ChannelAdapterRouter {
         if (simulatorEnabled && isSimulatorChannel(channel)) {
             return true;
         }
-        return isWooCommerceChannel(channel) && wooCommerceProperties.readAvailable(channel);
+        return isWooCommerceChannel(channel)
+                && connectionBound(channel)
+                && wooCommerceProperties.readAvailable(channel);
+    }
+
+    /**
+     * Connected is not enough for a real connector: the persisted proof must still describe the
+     * configured store. A changed URL or credential pair forces a fresh verification.
+     */
+    private boolean connectionBound(Channel channel) {
+        return channel.getStatus() == Channel.Status.CONNECTED
+                && channel.getConnectionVerifiedAt() != null
+                && "woocommerce".equalsIgnoreCase(channel.getConnectorName())
+                && wooCommerceProperties.storeTargetIssue(channel) == null;
     }
 
     public ChannelInventoryAdapter require(Channel channel) {
@@ -109,12 +124,18 @@ public class ChannelAdapterRouter {
             return simulatorAdapter;
         }
         if (isWooCommerceChannel(channel)) {
-            if (wooCommerceProperties.readAvailable(channel)) {
+            String configurationIssue = wooCommerceProperties.configurationIssue(channel);
+            if (configurationIssue != null) {
+                throw new ChannelAdapterException(ChannelAdapterException.Kind.UNAVAILABLE,
+                        configurationIssue,
+                        "WooCommerce is not available for read/verification.");
+            }
+            if (connectionBound(channel)) {
                 return wooCommerceAdapter;
             }
-            String issue = wooCommerceProperties.configurationIssue(channel);
+            String issue = wooCommerceProperties.storeTargetIssue(channel);
             throw new ChannelAdapterException(ChannelAdapterException.Kind.UNAVAILABLE,
-                    issue == null ? WooCommerceReason.NOT_CONFIGURED : issue,
+                    issue == null ? WooCommerceReason.CONNECTION_NOT_VERIFIED : issue,
                     "WooCommerce is not available for read/verification.");
         }
         log.debug("No readable adapter for channel env={} code={}", channel.getEnvironment(), channel.getCode());
