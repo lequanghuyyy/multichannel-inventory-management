@@ -31,6 +31,24 @@ public interface AllocationPlanRepository extends JpaRepository<AllocationPlan, 
     boolean existsByVariantIdAndStatus(Long variantId, AllocationPlan.Status status);
 
     /**
+     * Blocked plans that still own a blocked item for this listing at the listing's current
+     * allocation revision. Older plans are deliberately excluded: a newer confirmed target must
+     * never be rolled back by recovering a historical plan.
+     */
+    @Query(value = """
+            SELECT DISTINCT p.id
+            FROM allocation_plans p
+            JOIN allocation_plan_items i ON i.plan_id = p.id
+            WHERE p.status = 'BLOCKED'
+              AND p.allocation_revision = :allocationRevision
+              AND i.listing_id = :listingId
+              AND i.status = 'BLOCKED'
+            ORDER BY p.id DESC
+            """, nativeQuery = true)
+    List<Long> findBlockedPlanIdsForListingAtRevision(@Param("listingId") Long listingId,
+                                                      @Param("allocationRevision") long allocationRevision);
+
+    /**
      * Claims due plans for one short lease window. The row lock is released before any adapter is
      * contacted; the lease in the row is what makes a crashed worker recoverable.
      */

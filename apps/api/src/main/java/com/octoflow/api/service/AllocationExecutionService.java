@@ -77,12 +77,28 @@ public class AllocationExecutionService {
         try {
             adapter = adapterRouter.require(action.channel());
         } catch (ChannelAdapterException ex) {
-            processor.applyFailure(action, ex.getKind(), ex.getMessage());
+            processor.applyFailure(action, ex.getKind(), ex.reasonCodeOrKind(), ex.getMessage(), false);
             return true;
         }
 
+        boolean writeAttempted = false;
         try {
             ChannelInventoryAdapter.RemoteStock before = adapter.readStock(action.channel(), action.listing());
+            if (adapter.requiresVerifiedStockBaseline()) {
+                Integer baseline = action.baselineQuantity();
+                if (baseline == null) {
+                    processor.applyFailure(action, ChannelAdapterException.Kind.UNAVAILABLE,
+                            "NO_STOCK_BASELINE",
+                            "No verified remote stock baseline exists for this listing; reconcile before allocating.",
+                            false);
+                    return true;
+                }
+                if (before.quantity() != baseline) {
+                    processor.applyPreWriteDrift(action, before.quantity(), baseline);
+                    return true;
+                }
+            }
+            writeAttempted = true;
             ChannelInventoryAdapter.DeliveryReceipt receipt = adapter.writeStock(
                     action.channel(), action.listing(), action.targetQuantity(), action.idempotencyReference());
             ChannelInventoryAdapter.RemoteStock after = adapter.readStock(action.channel(), action.listing());
@@ -94,10 +110,11 @@ public class AllocationExecutionService {
             processor.applySuccess(action, before.quantity(),
                     receipt.sentQuantity(), receipt.acknowledgedQuantity(), after.quantity());
         } catch (ChannelAdapterException ex) {
-            processor.applyFailure(action, ex.getKind(), ex.getMessage());
+            processor.applyFailure(action, ex.getKind(), ex.reasonCodeOrKind(), ex.getMessage(), writeAttempted);
         } catch (RuntimeException ex) {
             processor.applyFailure(action, ChannelAdapterException.Kind.PROTOCOL,
-                    "Unexpected adapter error: " + ex.getMessage());
+                    ChannelAdapterException.Kind.PROTOCOL.name(),
+                    "Unexpected adapter error: " + ex.getMessage(), writeAttempted);
         }
         return true;
     }

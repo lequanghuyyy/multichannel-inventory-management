@@ -313,18 +313,16 @@ class Phase04AllocationSyncIntegrationTest {
                 com.octoflow.api.entity.SimulatorFault.FaultType.TIMEOUT, 10, 0);
 
         assertTrue(allocationExecutionService.processPlan(plan.id()));
-        assertEquals("APPLYING", planStatus(plan.id()));
-        assertEquals("RETRY_PENDING", itemStatus(plan.id(), decreaseListing));
+        assertEquals("BLOCKED", planStatus(plan.id()),
+                "a timeout during the decrease write is uncertain and must block immediately");
+        assertEquals("BLOCKED", itemStatus(plan.id(), decreaseListing));
         assertEquals("PENDING", itemStatus(plan.id(), increaseListing));
         assertEquals(1, evidenceForPlan(plan.id()).stream()
                 .filter(row -> "TIMEOUT".equals(row.get("error_code")))
                 .count());
 
-        Thread.sleep(30);
-        assertTrue(allocationExecutionService.processPlan(plan.id()));
-        assertEquals("BLOCKED", planStatus(plan.id()));
-        assertEquals("BLOCKED", itemStatus(plan.id(), decreaseListing));
-        assertEquals("PENDING", itemStatus(plan.id(), increaseListing));
+        assertFalse(allocationExecutionService.processPlan(plan.id()),
+                "the same uncertain write must never be retried automatically");
 
         assertEquals(5, quota(decreaseListing), "an uncertain remote result must never be treated as applied");
         assertEquals(0, quota(increaseListing));
@@ -338,9 +336,52 @@ class Phase04AllocationSyncIntegrationTest {
         assertFalse(allocationExecutionService.processPlan(plan.id()));
     }
 
-    // ------------------------------------------------------------------
-    // Outbox and sync jobs
-    // ------------------------------------------------------------------
+    @Test
+    @WithMockUser(roles = "ADMIN")
+    void reconciliationAdoptsATimedOutDecreaseThenResumesTheIncreaseInOrder() throws Exception {
+        Fixture fixture = fixture(10, 0, 0);
+        Long decreaseChannel = channel("simulated");
+        Long increaseChannel = channel("simulated");
+        Long decreaseListing = listing(decreaseChannel, fixture.variantId(), 5,
+                ChannelListing.MappingStatus.VERIFIED);
+        Long increaseListing = listing(increaseChannel, fixture.variantId(), 0,
+                ChannelListing.MappingStatus.VERIFIED);
+        simulatorStateService.setExternalStock(decreaseListing, 5);
+        simulatorStateService.setExternalStock(increaseListing, 0);
+
+        Map<Long, Integer> desired = new LinkedHashMap<>();
+        desired.put(decreaseListing, 2);
+        desired.put(increaseListing, 3);
+        AllocationPlanResponse plan = preview(fixture.sku(), desired);
+        allocationService.confirm(plan.id(), "recovery-" + UUID.randomUUID());
+        simulatorStateService.injectFault(decreaseListing,
+                com.octoflow.api.entity.SimulatorFault.FaultType.TIMEOUT_AFTER_WRITE, 1, 0);
+
+        assertTrue(allocationExecutionService.processPlan(plan.id()));
+        assertEquals("BLOCKED", planStatus(plan.id()));
+        assertEquals(2, simulatorStateService.getState(decreaseListing).quantity(),
+                "the decrease reached the simulator before the timeout");
+        assertEquals(5, quota(decreaseListing), "the uncertain result is not adopted automatically");
+        assertEquals(0, simulatorStateService.getState(increaseListing).quantity(),
+                "no increase may run while the decrease is unverified");
+        assertTrue(evidenceForPlan(plan.id()).stream().noneMatch(row ->
+                "ALLOCATION_INCREASE".equals(row.get("kind"))));
+
+        ChannelSyncEvidenceResponse observed = reconciliationService.reconcileListing(decreaseChannel, decreaseListing);
+        assertEquals("VERIFIED", observed.status());
+        assertEquals(2, observed.targetQuantity());
+        assertEquals(2, observed.verifiedQuantity());
+        assertEquals("APPLYING", planStatus(plan.id()),
+                "the resolved plan must resume instead of staying stuck");
+
+        assertTrue(allocationExecutionService.processPlan(plan.id()));
+        assertEquals("COMPLETED", planStatus(plan.id()));
+        assertEquals(2, quota(decreaseListing));
+        assertEquals(3, quota(increaseListing));
+        assertEquals(3, simulatorStateService.getState(increaseListing).quantity());
+        assertEquals(List.of("ALLOCATION_DECREASE", "ALLOCATION_DECREASE", "ALLOCATION_INCREASE"),
+                evidenceForPlan(plan.id()).stream().map(row -> (String) row.get("kind")).toList());
+    }
 
     @Test
     void outboxFanOutCreatesOneActiveJobPerEligibleListingAndSupersedesStaleJobs() throws Exception {

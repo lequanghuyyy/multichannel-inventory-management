@@ -27,6 +27,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
   window.history.replaceState({}, '', '/channels');
 });
 
@@ -106,6 +107,33 @@ describe('ChannelDetailPage', () => {
 
     resolveRefresh?.(channel);
     await waitFor(() => expect(getChannel).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows explicit unsupported panels for WooCommerce orders and history without calling missing APIs', async () => {
+    const channelId = '30000000-0000-4000-8000-000000000004';
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    getChannel.mockResolvedValue({
+      id: channelId, code: 'woocommerce', name: 'Woo Dev Store', type: 'marketplace',
+      environment: 'development', status: 'connected', mapping_count: 3,
+    });
+
+    window.history.replaceState({}, '', '/channels?tab=orders');
+    const view = render(<ChannelDetailPage id={channelId} mode="default" />);
+    expect(await screen.findByRole('heading', { name: 'Đơn hàng WooCommerce' })).toBeInTheDocument();
+    expect(screen.getByText('Chưa hỗ trợ')).toBeInTheDocument();
+    expect(screen.queryByText('Nhập đơn hàng')).toBeNull();
+    view.unmount();
+
+    window.history.replaceState({}, '', '/channels?tab=history');
+    render(<ChannelDetailPage id={channelId} mode="default" />);
+    expect(await screen.findByRole('heading', { name: 'Lịch sử hoạt động WooCommerce' })).toBeInTheDocument();
+    expect(screen.queryByText('Lịch sử kênh')).toBeNull();
+
+    // Order ingestion, activity history and channel settings have no Java endpoint yet. The
+    // screen must not call them and then present the 404 as if the store were broken.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(listChannelMappings).not.toHaveBeenCalled();
   });
 
   it('ignores a channel response that arrives after navigation to another channel', async () => {

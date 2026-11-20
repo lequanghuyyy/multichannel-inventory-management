@@ -112,23 +112,7 @@ const shopifyAPI = vi.hoisted(() => ({
   getShopifyProductSyncJobs: vi.fn().mockResolvedValue([]),
   pushShopifyProduct: vi.fn(),
 }));
-const wooCommerceAPI = vi.hoisted(() => ({
-  getWooCommerceProductState: vi.fn(), getWooCommerceProductJobs: vi.fn(),
-  queueWooCommerceProductAction: vi.fn(), retryWooCommerceProductJob: vi.fn(),
-}));
 vi.mock('../../api/shopify', () => shopifyAPI);
-vi.mock('../../api/woocommerce', () => wooCommerceAPI);
-beforeEach(() => {
-  wooCommerceAPI.getWooCommerceProductState.mockReset().mockResolvedValue({
-    product_id: '10000000-0000-4000-8000-000000000001', product_version: 7,
-    publication_state: 'not_exported', mapping_state: 'unmapped', catalog_sync_state: 'not_synced',
-    inventory_activation_state: 'inactive', channel_connected: false,
-    product_write_enabled: false, inventory_write_enabled: false,
-  });
-  wooCommerceAPI.getWooCommerceProductJobs.mockReset().mockResolvedValue([]);
-  wooCommerceAPI.queueWooCommerceProductAction.mockReset();
-  wooCommerceAPI.retryWooCommerceProductJob.mockReset();
-});
 vi.mock('../shared/useSystemSnapshot', () => ({
   useSystemSnapshot: () => ({ snapshot: { system: { catalog_write_available: true } }, loading: false, error: '', checked: '', refresh: vi.fn() }),
 }));

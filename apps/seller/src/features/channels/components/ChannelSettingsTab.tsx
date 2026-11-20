@@ -3,7 +3,6 @@ import type { Channel } from '../../../api/channels';
 import { connectShopifyStore, verifyShopifyStore } from '../../../api/shopify';
 import type { ShopifyStatus } from '../../../api/shopify';
 import { startEbayOAuth, verifyEbayChannel } from '../../../api/ebay';
-import { connectWooCommerceStore, verifyWooCommerceStore } from '../../../api/woocommerce';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { Button } from '../../../components/ui/Button';
 import { Card } from '../../../components/ui/Card';
@@ -28,9 +27,6 @@ export function ChannelSettingsTab({ channel, canManage, status, statusLoading, 
       if (channel.code === 'shopify') {
         const result = connected ? await verifyShopifyStore() : await connectShopifyStore();
         onStatusChange(result); setConnectedOverride(result.connected); setActionMessage(result.connected ? 'Cửa hàng đã sẵn sàng.' : 'Cửa hàng chưa kết nối. Vui lòng kiểm tra lại thông tin.');
-      } else if (channel.code === 'woocommerce') {
-        const result = connected ? await verifyWooCommerceStore() : await connectWooCommerceStore();
-        setConnectedOverride(result.connected); setActionMessage(result.connected ? 'Cửa hàng đã sẵn sàng.' : 'Cửa hàng chưa kết nối. Vui lòng kiểm tra lại thông tin.');
       } else if (channel.code === 'ebay') {
         if (connected) {
           const result = await verifyEbayChannel(channel.id);
@@ -51,7 +47,7 @@ export function ChannelSettingsTab({ channel, canManage, status, statusLoading, 
 
   const platform = platformName(channel.code, channel.type);
   const shopName = channel.code === 'shopify' && status?.channel_id === channel.id ? status.shop_name || status.shop_domain || channel.name : channel.name;
-  const canConnect = ['shopify', 'woocommerce', 'ebay'].includes(channel.code);
+  const canConnect = ['shopify', 'ebay'].includes(channel.code);
 
   return <div className="grid min-w-0 gap-5">
     <header><h2 className="font-display text-xl font-bold text-on-surface">Cấu hình cửa hàng</h2></header>

@@ -12,7 +12,6 @@ import { ChannelGrid } from './components/ChannelGrid';
 import { ChannelsHeader } from './components/ChannelsHeader';
 import { getEbayStatus, startEbayOAuth } from '../../api/ebay';
 import { AuthContext } from '../auth/AuthProvider';
-import { connectWooCommerceStore, getWooCommerceStatus, type WooCommerceStatus } from '../../api/woocommerce';
 import { getLazadaStatus, startLazadaOAuth, type LazadaStatus } from '../../api/lazada';
 import type { ChannelFilters } from './channel.types';
 import { filterChannels, initialChannelFilters } from './channel.utils';
@@ -37,10 +36,6 @@ export function ChannelsPage({ mode }: { mode: DemoMode }) {
   const [ebayStatusError, setEbayStatusError] = useState<string | null>(null);
   const [ebayConnecting, setEbayConnecting] = useState(false);
   const [ebayConnectError, setEbayConnectError] = useState<string | null>(null);
-  const [woocommerceStatus, setWooCommerceStatus] = useState<WooCommerceStatus | null>(null);
-  const [woocommerceStatusError, setWooCommerceStatusError] = useState<string | null>(null);
-  const [woocommerceConnecting, setWooCommerceConnecting] = useState(false);
-  const [woocommerceConnectError, setWooCommerceConnectError] = useState<string | null>(null);
   const [lazadaStatus, setLazadaStatus] = useState<LazadaStatus | null>(null);
   const [lazadaError, setLazadaError] = useState<string | null>(null);
   const [lazadaConnecting, setLazadaConnecting] = useState(false);
@@ -72,19 +67,6 @@ export function ChannelsPage({ mode }: { mode: DemoMode }) {
     });
     return () => controller.abort();
   }, [mode, lazadaOAuthResult]);
-
-  useEffect(() => {
-    if (mode !== 'default') return;
-    const controller = new AbortController();
-    void getWooCommerceStatus(controller.signal).then((status) => {
-      if (controller.signal.aborted) return;
-      setWooCommerceStatus(status);
-      setWooCommerceStatusError(null);
-    }).catch((cause: unknown) => {
-      if (!controller.signal.aborted) setWooCommerceStatusError(cause instanceof Error ? cause.message : 'Không đọc được trạng thái WooCommerce.');
-    });
-    return () => controller.abort();
-  }, [mode]);
 
   useEffect(() => {
     if (!oauthResult) return;
@@ -123,22 +105,6 @@ export function ChannelsPage({ mode }: { mode: DemoMode }) {
     }
   };
 
-  const connectWooCommerce = async () => {
-    if (auth?.user?.role !== 'ADMIN' || !woocommerceStatus?.enabled || !woocommerceStatus.configured || woocommerceConnecting) return;
-    setWooCommerceConnecting(true);
-    setWooCommerceConnectError(null);
-    try {
-      const result = await connectWooCommerceStore();
-      setWooCommerceStatus(result);
-      await page.refresh();
-      if (result.channel_id) navigate(href({ name: 'channel-detail', id: result.channel_id }));
-    } catch (cause) {
-      setWooCommerceConnectError(cause instanceof Error ? cause.message : 'Không thể xác minh WooCommerce.');
-    } finally {
-      setWooCommerceConnecting(false);
-    }
-  };
-
   // The channel endpoint exposes keyset pagination but no aggregate endpoint. Walk its
   // bounded pages so the overview metrics describe the whole live channel set.
   useEffect(() => {
@@ -172,14 +138,12 @@ export function ChannelsPage({ mode }: { mode: DemoMode }) {
   const resetFilters = () => setFilters(initialChannelFilters);
 
   return <section className="mx-auto flex w-full max-w-[1240px] flex-col gap-6 py-8">
-    <ChannelsHeader onRefresh={page.refresh} refreshing={page.loading || page.loadingMore} canManage={auth?.user?.role === 'ADMIN'} ebayEnabled={ebayEnabled} ebayConnections={ebayConnections} ebayConnecting={ebayConnecting} onConnectEbay={() => void connectEbay()} woocommerceStatus={mode === 'default' ? woocommerceStatus : null} woocommerceStatusError={woocommerceStatusError} woocommerceConnecting={woocommerceConnecting} onConnectWooCommerce={() => void connectWooCommerce()} onOpenWooCommerce={() => woocommerceStatus?.channel_id && navigate(href({ name: 'channel-detail', id: woocommerceStatus.channel_id }))} lazadaStatus={mode === 'default' ? lazadaStatus : null} lazadaConnecting={lazadaConnecting} onConnectLazada={() => void connectLazada()} onOpenLazada={() => lazadaStatus?.connection?.channel_id && navigate(href({ name: 'channel-detail', id: lazadaStatus.connection.channel_id }))} />
+    <ChannelsHeader onRefresh={page.refresh} refreshing={page.loading || page.loadingMore} canManage={auth?.user?.role === 'ADMIN'} ebayEnabled={ebayEnabled} ebayConnections={ebayConnections} ebayConnecting={ebayConnecting} onConnectEbay={() => void connectEbay()} lazadaStatus={mode === 'default' ? lazadaStatus : null} lazadaConnecting={lazadaConnecting} onConnectLazada={() => void connectLazada()} onOpenLazada={() => lazadaStatus?.connection?.channel_id && navigate(href({ name: 'channel-detail', id: lazadaStatus.connection.channel_id }))} />
     {lazadaOAuthResult ? <Card role="status" className="border border-outline-variant/50 p-3 text-sm text-on-surface">{lazadaOAuthResult === 'connected' ? 'Lazada VN đã ủy quyền. Hãy mở kênh để xác minh quyền đọc sản phẩm.' : `Kết nối Lazada chưa hoàn tất (${lazadaOAuthResult}). Kiểm tra seller whitelist, callback và quyền ứng dụng.`}</Card> : null}
     {lazadaError ? <p role="alert" className="rounded-control border border-error/40 bg-error/5 p-3 text-sm text-error">{lazadaError}</p> : null}
     {oauthResult ? <Card role="status" className={`border p-3 text-sm leading-5 ${oauthResult === 'connected' ? 'border-success/40 bg-success/5 text-on-surface' : 'border-apricot/60 bg-apricot/5 text-on-surface'}`}>{oauthResult === 'connected' ? 'eBay Sandbox đã hoàn tất ủy quyền. Danh sách kênh đang được tải lại.' : oauthResult === 'denied' ? 'Bạn đã từ chối quyền eBay. Có thể bắt đầu kết nối lại bất cứ lúc nào.' : `Kết nối eBay chưa hoàn tất (${oauthResult}). Kiểm tra RuName, quyền ứng dụng và cấu hình Sandbox rồi thử lại.`}</Card> : null}
     {ebayStatusError && mode === 'default' ? <p role="status" className="text-caption text-graphite">Chưa đọc được trạng thái kết nối eBay: {ebayStatusError}</p> : null}
     {ebayConnectError ? <p role="alert" className="rounded-control border border-error/40 bg-error/5 p-3 text-sm text-error">{ebayConnectError}</p> : null}
-    {woocommerceStatusError && mode === 'default' ? <p role="status" className="text-caption text-graphite">Chưa đọc được trạng thái WooCommerce: {woocommerceStatusError}</p> : null}
-    {woocommerceConnectError ? <p role="alert" className="rounded-control border border-error/40 bg-error/5 p-3 text-sm text-error">{woocommerceConnectError}</p> : null}
     {isFixture ? <Card className="border border-apricot/40 p-3 text-sm text-on-surface" variant="muted" role="status">Đang xem dữ liệu demo. Trạng thái này không chứng minh Shopify đã kết nối.</Card> : null}
     {isFixture && !page.loading && !page.fixtureError && fixtureChannels.length > 0 ? (
       <section aria-label="Chỉ số kênh bán" className="grid grid-cols-1 gap-4 sm:grid-cols-3">

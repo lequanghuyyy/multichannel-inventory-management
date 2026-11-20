@@ -75,6 +75,10 @@ public class SyncJobManagementService {
             throw new BusinessRuleException(ErrorCode.SYNC_RETRY_NOT_ALLOWED,
                     "Sync job #" + jobId + " có kết quả remote chưa xác nhận; hãy đối soát trước khi thử lại.");
         }
+        if (job.getStatus() == SyncJob.Status.DRIFT) {
+            throw new BusinessRuleException(ErrorCode.SYNC_RETRY_NOT_ALLOWED,
+                    "Sync job #" + jobId + " đang lệch tồn với kênh; hãy đối soát trước khi thử lại.");
+        }
 
         ChannelListing listing = listingRepository.findByChannelIdAndIdForUpdate(job.getChannelId(), job.getListingId())
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.MAPPING_NOT_FOUND,

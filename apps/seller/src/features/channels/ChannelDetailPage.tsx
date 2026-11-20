@@ -11,10 +11,12 @@ import { ChannelWorkspaceTabs, isChannelWorkspaceTab, type ChannelWorkspaceTab }
 import { ChannelOverviewTab } from './components/ChannelOverviewTab';
 import { ChannelBrandIcon } from '../../components/common/ChannelBrandIcon';
 import { ChannelOrderIngestion, ChannelActivityHistory, ChannelCapabilitiesSettings } from './components/ChannelOperations';
+import { UnsupportedChannelFeature } from './components/UnsupportedChannelFeature';
 import { ChannelSettingsTab } from './components/ChannelSettingsTab';
 import { ShopifyCapabilityPanel } from './components/ShopifyCapabilityPanel';
 import { ShopifyIntegrationPanel } from './components/ShopifyIntegrationPanel';
 import { WooCommerceSettingsPanel } from './components/WooCommerceSettingsPanel';
+import { WooCommerceMappingPanel } from './components/WooCommerceMappingPanel';
 import { LazadaPanel } from './components/LazadaPanel';
 import { LazadaOrdersPanel } from './components/LazadaOrdersPanel';
 import { ChannelApiProductsTab } from './components/ChannelApiProductsTab';
@@ -253,6 +255,8 @@ export function ChannelDetailPage({ id, mode }: { id: string; mode: DemoMode }) 
       {!fixture && currentChannel && activeTab === 'overview' ? <ChannelOverviewTab key={`${currentChannel.id}:${attempt}`} channel={currentChannel} shopifyStatus={shopifyStatus} mappings={mappings} issues={issues} issueCount={issueCount} onNavigate={selectTab} /> : null}
       {!fixture && currentChannel && activeTab === 'products' ? currentChannel.code === 'lazada'
         ? <LazadaPanel key={`${currentChannel.id}:${attempt}`} channel={currentChannel} tab="products" canManage={canManage} onUpdated={refresh} onSettings={() => selectTab('settings')} />
+        : currentChannel.code === 'woocommerce'
+        ? <WooCommerceMappingPanel key={`${currentChannel.id}:${attempt}`} channel={currentChannel} canManage={canManage} onUpdated={refreshMappings} />
         : <ChannelApiProductsTab
             channel={currentChannel}
             mappings={mappings}
@@ -289,10 +293,14 @@ export function ChannelDetailPage({ id, mode }: { id: string; mode: DemoMode }) 
           />
         )
       ) : null}
-      {!fixture && currentChannel && activeTab === 'orders' ? currentChannel.code === 'lazada'
+      {!fixture && currentChannel && activeTab === 'orders' ? currentChannel.code === 'woocommerce'
+        ? <UnsupportedChannelFeature channel={currentChannel} feature="Đơn hàng WooCommerce" />
+        : currentChannel.code === 'lazada'
         ? <LazadaOrdersPanel key={`${currentChannel.id}:${attempt}`} channelId={currentChannel.id} canManage={canManage} connected={currentChannel.status === 'connected'} />
         : <ChannelOrderIngestion key={`${currentChannel.id}:${attempt}`} channel={currentChannel} canManage={canManage} /> : null}
-      {!fixture && currentChannel && activeTab === 'history' ? <ChannelActivityHistory key={`${currentChannel.id}:${attempt}`} channel={currentChannel} /> : null}
+      {!fixture && currentChannel && activeTab === 'history' ? currentChannel.code === 'woocommerce'
+        ? <UnsupportedChannelFeature channel={currentChannel} feature="Lịch sử hoạt động WooCommerce" />
+        : <ChannelActivityHistory key={`${currentChannel.id}:${attempt}`} channel={currentChannel} /> : null}
       {!fixture && currentChannel && activeTab === 'settings' ? <div className="grid gap-5">
         {currentChannel.code === 'shopify' ? (
           <ShopifyIntegrationPanel canManage={canManage} channelId={currentChannel.id} onUpdated={refresh} />
@@ -304,7 +312,7 @@ export function ChannelDetailPage({ id, mode }: { id: string; mode: DemoMode }) 
           <ChannelSettingsTab key={`${currentChannel.id}:${attempt}`} channel={currentChannel} canManage={canManage} status={shopifyStatus} statusLoading={shopifyStatusLoading} statusError={shopifyStatusError} onStatusChange={setShopifyStatus} onUpdated={refresh} />
         )}
         {currentChannel.code === 'shopify' ? <ShopifyCapabilityPanel channelId={currentChannel.id} canManage={canManage} /> : null}
-        <ChannelCapabilitiesSettings channel={currentChannel} />
+        {currentChannel.code === 'woocommerce' ? null : <ChannelCapabilitiesSettings channel={currentChannel} />}
       </div> : null}
     </div>
   </ChannelWorkspaceFrame>;

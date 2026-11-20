@@ -20,9 +20,13 @@ import java.util.Map;
 
 /**
  * Applies a reconciliation observation after the remote read has completed. The target is the
- * listing's allocated quota; a mismatch is recorded as drift and queues a correction job unless
- * an allocation step for the same listing is still in flight. A matching read also resolves an
- * earlier UNCONFIRMED job instead of retrying it blindly.
+ * listing's allocated quota; a mismatch is always recorded as drift with evidence.
+ *
+ * Only the simulator auto-queues a correction job. A real connector cannot explain an external
+ * stock change yet (order ingestion does not exist in this phase), so silently overwriting the
+ * store with the local quota would destroy inventory the operator has not accounted for. Live
+ * channels therefore surface drift for review and leave the listing OUT_OF_SYNC.
+ * A matching read also resolves an earlier UNCONFIRMED job instead of retrying it blindly.
  */
 @Service
 public class ReconciliationRecorder {
@@ -30,17 +34,20 @@ public class ReconciliationRecorder {
     private final ChannelListingRepository listingRepository;
     private final SyncJobRepository jobRepository;
     private final AllocationPlanItemRepository allocationPlanItemRepository;
+    private final AllocationExecutionProcessor allocationExecutionProcessor;
     private final ChannelEvidenceRecorder evidenceRecorder;
     private final SyncEventBroadcaster broadcaster;
 
     public ReconciliationRecorder(ChannelListingRepository listingRepository,
                                   SyncJobRepository jobRepository,
                                   AllocationPlanItemRepository allocationPlanItemRepository,
+                                  AllocationExecutionProcessor allocationExecutionProcessor,
                                   ChannelEvidenceRecorder evidenceRecorder,
                                   SyncEventBroadcaster broadcaster) {
         this.listingRepository = listingRepository;
         this.jobRepository = jobRepository;
         this.allocationPlanItemRepository = allocationPlanItemRepository;
+        this.allocationExecutionProcessor = allocationExecutionProcessor;
         this.evidenceRecorder = evidenceRecorder;
         this.broadcaster = broadcaster;
     }
@@ -54,8 +61,13 @@ public class ReconciliationRecorder {
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.MAPPING_NOT_FOUND,
                         "Không tìm thấy liên kết #" + listingId));
 
-        int target = listing.getAllocatedQuota();
         int remoteBefore = listing.getReportedStock();
+        // Adopt an uncertain allocation step only when the store already holds its intended
+        // quantity. This runs before the observation target is read, so a recovered step makes
+        // the reconciliation result reflect the newly verified quota instead of the old one.
+        allocationExecutionProcessor.recoverBlockedItemsFromReconciliation(
+                listing, remoteQuantity, adapterName, reference);
+        int target = listing.getAllocatedQuota();
         boolean matches = remoteQuantity == target;
 
         ChannelSyncEvidence evidence = evidenceRecorder.record(listing.getId(),
@@ -86,7 +98,8 @@ public class ReconciliationRecorder {
 
         resolveUncertainJobs(listing, target, remoteQuantity, remoteBefore, adapterName, reference);
 
-        if (!matches && !allocationInFlight(listing.getId())) {
+        if (!matches && autoCorrectionAllowed(adapterName)
+                && !allocationInFlight(listing.getId()) && !currentTargetBlocked(listing)) {
             jobRepository.supersedeActiveForListing(listing.getId(),
                     "Reconciliation found drift; queued a fresh correction.");
             SyncJob correction = new SyncJob();
@@ -144,10 +157,28 @@ public class ReconciliationRecorder {
         }
     }
 
+    /**
+     * The simulator has no external stock movement, so a mismatch can only be a delivery defect
+     * and auto-correction is the intended Phase 04 behaviour. Real channels wait for an operator.
+     */
+    private boolean autoCorrectionAllowed(String adapterName) {
+        return "simulator".equalsIgnoreCase(adapterName);
+    }
+
     private boolean allocationInFlight(Long listingId) {
         return allocationPlanItemRepository.existsActiveForListing(listingId,
                 AllocationPlan.Status.APPLYING,
                 List.of(AllocationPlanItem.Status.PENDING, AllocationPlanItem.Status.RETRY_PENDING));
+    }
+
+    /**
+     * A blocked allocation leaves the listing target unconfirmed. Auto-correcting the remote to
+     * that target would publish a quota the operator never successfully delivered (for example,
+     * writing 0 after an 8-unit increase was blocked).
+     */
+    private boolean currentTargetBlocked(ChannelListing listing) {
+        return allocationPlanItemRepository.existsForListingAtRevision(listing.getId(),
+                listing.getTargetAllocationRevision(), AllocationPlan.Status.BLOCKED);
     }
 
     private ChannelSyncEvidenceResponse toResponse(ChannelSyncEvidence evidence) {

@@ -5,7 +5,6 @@ import { listChannelProducts, type ChannelProduct, type ChannelProductState } fr
 import { getChannelPrices, getProduct, getProductPublicationHistory, listProductMedia, type ChannelVariantPrice, type ProductMedia } from '../../../api/products';
 import { getProductMediaContent } from '../../../api/products';
 import { getEbayProductJobs, type EbayProductSyncJob } from '../../../api/ebay';
-import { getWooCommerceProductJobs, getWooCommerceProductState, type WooCommerceProductSyncJob } from '../../../api/woocommerce';
 import { Button } from '../../../components/ui/Button';
 import { Card } from '../../../components/ui/Card';
 import { Drawer } from '../../../components/ui/Drawer';
@@ -14,7 +13,7 @@ import { Input } from '../../../components/ui/Input';
 import { StatusBadge } from '../../../components/common/StatusBadge';
 import { ProductPublicationPanel } from '../../products/components/ProductPublicationPanel';
 import { EbayProductPanel } from '../../products/components/EbayProductPanel';
-import { WooCommerceProductPanel, wooJobError } from '../../products/components/WooCommerceProductPanel';
+import { WooCommerceProductPanel } from '../../products/components/WooCommerceProductPanel';
 import { LazadaProductPreflightPanel, type LazadaSetupSummary } from './LazadaProductPreflightPanel';
 import { LazadaPublicationPanel } from './LazadaPublicationPanel';
 import { lazadaPriceText } from './lazada-publish.messages';
@@ -519,7 +518,7 @@ export function ChannelProductPublishingWizard({
           {!canWrite ? <p role="alert" className="rounded-lg border border-badge-blocked-text/30 bg-badge-blocked-bg p-3 text-sm leading-5 text-badge-blocked-text">Tài khoản của bạn không có quyền tạo sản phẩm trên kênh này.</p> : null}
           {channel.code === 'shopify' ? <ProductPublicationPanel productId={detail.id} productVersion={detail.productVersion} canWrite={canWrite} channelFilter={channel.id} draftOnly={!manageMode} wizardMode={!manageMode} readOnlyWhileProcessing={selected.state === 'syncing'} onDraftPreview={setPreview} onDraftSubmitReady={(submit) => { submitRef.current = submit; }} onDraftQueued={(result: Pick<PublicationRequestResult, 'id' | 'state'>) => recordQueued({ id: result.id, state: result.state })} /> : null}
           {channel.code === 'ebay' ? <EbayProductPanel product={detail} canWrite={canWrite} initialChannelId={channel.id} wizardMode={!manageMode} onDraftReadinessChange={(ready, reason) => { setDraftReady(ready); setDraftBlocker(reason ?? ''); }} onDraftSubmitReady={(submit) => { submitRef.current = submit; }} onDraftQueued={(job: EbayProductSyncJob) => recordQueued({ id: job.id, state: job.state })} /> : null}
-          {channel.code === 'woocommerce' ? <WooCommerceProductPanel product={detail} canWrite={canWrite} wizardMode={!manageMode} onDraftReadinessChange={(ready, reason) => { setDraftReady(ready); setDraftBlocker(reason ?? ''); }} onDraftSubmitReady={(submit) => { submitRef.current = submit; }} onDraftQueued={(job: WooCommerceProductSyncJob) => recordQueued({ id: job.id, state: job.state })} /> : null}
+          {channel.code === 'woocommerce' ? <WooCommerceProductPanel product={detail} canWrite={canWrite} wizardMode={!manageMode} onDraftReadinessChange={(ready, reason) => { setDraftReady(ready); setDraftBlocker(reason ?? ''); }} onDraftSubmitReady={(submit) => { submitRef.current = submit; }} onDraftQueued={(job: { id: string; state: string }) => recordQueued({ id: job.id, state: job.state })} /> : null}
           {channel.code === 'lazada' ? <LazadaProductPreflightPanel
             key={detail.id}
             channelId={channel.id}
@@ -664,24 +663,13 @@ function ProgressTracker({ channel, productId, receipt, setProgress, setProgress
           const jobs = await getEbayProductJobs(channel.id, productId);
           const job = jobs.find((entry) => entry.id === receipt.id);
           item = job ? { state: job.state, error: job.safe_error_code } : undefined;
-        } else if (channel.code === 'woocommerce') {
-          const jobs = await getWooCommerceProductJobs(productId);
-          const job = jobs.find((entry) => entry.id === receipt.id);
-          if (job?.state === 'succeeded') {
-            const remote = await getWooCommerceProductState(productId);
-            item = remote.publication_state === 'draft'
-              ? { state: 'draft', detail: 'WooCommerce đã xác nhận sản phẩm ở trạng thái bản nháp.' }
-              : remote.publication_state === 'published'
-                ? { state: 'conflict', detail: 'Sản phẩm vẫn đang bán trên WooCommerce. Chưa tạo được bản nháp; hãy kiểm tra liên kết trước khi thao tác tiếp.' }
-                : { state: 'conflict', detail: 'Tác vụ đã chạy nhưng trạng thái sản phẩm trên WooCommerce chưa được xác minh là bản nháp.' };
-          } else item = job ? { state: job.state, error: job.safe_error_code } : undefined;
         }
         if (cancelled) return;
         if (!item) {
           setProgressError('Chưa đọc lại được tiến trình. Yêu cầu vẫn được giữ; hãy thử tải lại trạng thái.');
         } else {
           setProgressError('');
-          setProgress({ state: item.state, detail: item.detail ?? (item.error ? channel.code === 'woocommerce' ? `${wooJobError(item.error)} (${item.error})` : 'Kênh chưa xác minh được sản phẩm. Kiểm tra thông tin rồi thử lại.' : progressDetail(item.state)) });
+          setProgress({ state: item.state, detail: item.detail ?? (item.error ? 'Kênh chưa xác minh được sản phẩm. Kiểm tra thông tin rồi thử lại.' : progressDetail(item.state)) });
           shouldPoll = !['succeeded', 'verified', 'completed', 'draft', 'published', 'failed', 'sync_failed', 'preflight_failed', 'conflict', 'blocked'].includes(item.state);
         }
       } catch {

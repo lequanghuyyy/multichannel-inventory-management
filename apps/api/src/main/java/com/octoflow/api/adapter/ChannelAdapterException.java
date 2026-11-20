@@ -19,19 +19,40 @@ public class ChannelAdapterException extends RuntimeException {
     }
 
     private final Kind kind;
+    private final String reasonCode;
 
     public ChannelAdapterException(Kind kind, String message) {
-        super(message);
-        this.kind = kind;
+        this(kind, null, message, null);
     }
 
     public ChannelAdapterException(Kind kind, String message, Throwable cause) {
+        this(kind, null, message, cause);
+    }
+
+    public ChannelAdapterException(Kind kind, String reasonCode, String message) {
+        this(kind, reasonCode, message, null);
+    }
+
+    public ChannelAdapterException(Kind kind, String reasonCode, String message, Throwable cause) {
         super(message, cause);
         this.kind = kind;
+        this.reasonCode = reasonCode;
     }
 
     public Kind getKind() {
         return kind;
+    }
+
+    /**
+     * A stable classifier such as {@code WOO_AUTH_FAILED}. Null for adapters that only use the
+     * coarse {@link Kind}; callers then fall back to the kind name.
+     */
+    public String getReasonCode() {
+        return reasonCode;
+    }
+
+    public String reasonCodeOrKind() {
+        return reasonCode == null ? kind.name() : reasonCode;
     }
 
     public boolean isUncertain() {

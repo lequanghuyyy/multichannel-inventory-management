@@ -4,10 +4,9 @@ import type { Channel } from '../../../api/channels';
 import type { ChannelProduct } from '../../../api/channel-operations';
 import { ChannelProductPublishingWizard } from './ChannelProductPublishingWizard';
 
-const api = vi.hoisted(() => ({ listChannelProducts: vi.fn(), getProduct: vi.fn(), listProductMedia: vi.fn(), getProductMediaContent: vi.fn(), getChannelPrices: vi.fn(), getProductPublicationHistory: vi.fn(), getWooCommerceProductJobs: vi.fn(), getWooCommerceProductState: vi.fn(), listPublicationWorkflows: vi.fn(), getPublicationWorkflow: vi.fn() }));
+const api = vi.hoisted(() => ({ listChannelProducts: vi.fn(), getProduct: vi.fn(), listProductMedia: vi.fn(), getProductMediaContent: vi.fn(), getChannelPrices: vi.fn(), getProductPublicationHistory: vi.fn(), listPublicationWorkflows: vi.fn(), getPublicationWorkflow: vi.fn() }));
 vi.mock('../../../api/channel-operations', () => ({ listChannelProducts: api.listChannelProducts }));
 vi.mock('../../../api/publication-workflows', () => ({ listPublicationWorkflows: api.listPublicationWorkflows, getPublicationWorkflow: api.getPublicationWorkflow }));
-vi.mock('../../../api/woocommerce', () => ({ getWooCommerceProductJobs: api.getWooCommerceProductJobs, getWooCommerceProductState: api.getWooCommerceProductState }));
 vi.mock('../../../api/products', () => ({
   getProduct: api.getProduct,
   listProductMedia: api.listProductMedia,
@@ -23,11 +22,7 @@ vi.mock('../../products/components/ProductPublicationPanel', () => ({
 }));
 vi.mock('../../products/components/EbayProductPanel', () => ({ EbayProductPanel: () => null }));
 vi.mock('../../products/components/WooCommerceProductPanel', () => ({
-  wooJobError: (code: string) => code,
-  WooCommerceProductPanel: (props: { onDraftReadinessChange?: (ready: boolean) => void; onDraftSubmitReady?: (submit: () => Promise<void>) => void; onDraftQueued?: (result: { id: string; state: string }) => void }) => <button type="button" onClick={() => {
-    props.onDraftReadinessChange?.(true);
-    props.onDraftSubmitReady?.(async () => { props.onDraftQueued?.({ id: 'woo-job-1', state: 'pending' }); });
-  }}>Kiểm tra WooCommerce mẫu</button>,
+  WooCommerceProductPanel: () => <p>Đăng bán sản phẩm WooCommerce chưa được hỗ trợ.</p>,
 }));
 
 const channel = { id: '30000000-0000-4000-8000-000000000001', code: 'shopify', name: 'Shopify', type: 'website', environment: 'sandbox', status: 'connected' } as Channel;
@@ -51,8 +46,6 @@ beforeEach(() => {
   Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
   api.getChannelPrices.mockResolvedValue({ prices: [] });
   api.getProductPublicationHistory.mockResolvedValue({ requests: [{ id: 'request-1', state: 'draft', issues: [], last_error_code: '' }] });
-  api.getWooCommerceProductJobs.mockResolvedValue([{ id: 'woo-job-1', state: 'succeeded' }]);
-  api.getWooCommerceProductState.mockResolvedValue({ publication_state: 'draft' });
   api.listPublicationWorkflows.mockResolvedValue({ items: [] });
 });
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.clearAllMocks(); });
@@ -85,40 +78,6 @@ describe('ChannelProductPublishingWizard', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: /Điều phối đăng và phân bổ tồn theo một quy trình/ }));
     expect(await screen.findByText('Mỗi SKU có giá Shopify (giá riêng hoặc Core)')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Tiếp tục' })).toBeEnabled();
-  });
-
-  it('accepts a WooCommerce channel price when Core price is missing', async () => {
-    const wooChannel = { ...channel, code: 'woocommerce', name: 'WooCommerce', environment: 'development' } as Channel;
-    api.getProduct.mockResolvedValueOnce({
-      id: candidate.product_id, product_version: 4, name: candidate.name, category: candidate.category, brand: candidate.brand,
-      currency: 'VND', status: 'active', variant_count: 1, on_hand: 0, reserved: 0, safety_buffer: 0, available_to_sell: 0,
-      variants: [{ id: '20000000-0000-4000-8000-000000000001', sku: 'GIAY-001-41', color: 'Đen', size: '41', price_minor: null, is_active: true, variant_is_active: true }],
-    });
-    api.getChannelPrices.mockResolvedValue({ prices: [{
-      channel_id: wooChannel.id, variant_id: '20000000-0000-4000-8000-000000000001',
-      currency: 'VND', override_amount: '100000',
-    }] });
-    render(<ChannelProductPublishingWizard channel={wooChannel} open canWrite onClose={vi.fn()} onCompleted={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: /Giày thể thao ABC/ }));
-    fireEvent.click(screen.getByRole('checkbox', { name: /Điều phối đăng và phân bổ tồn theo một quy trình/ }));
-
-    expect(await screen.findByText('Mỗi SKU có giá WooCommerce (giá riêng hoặc Core)')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Tiếp tục' })).toBeEnabled());
-  });
-
-  it('does not report a WooCommerce draft when the readback is still published', async () => {
-    const wooChannel = { ...channel, code: 'woocommerce', name: 'WooCommerce', environment: 'development' } as Channel;
-    api.getWooCommerceProductState.mockResolvedValue({ publication_state: 'published' });
-    render(<ChannelProductPublishingWizard channel={wooChannel} open canWrite onClose={vi.fn()} onCompleted={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: /Giày thể thao ABC/ }));
-    fireEvent.click(screen.getByRole('checkbox', { name: /Điều phối đăng và phân bổ tồn theo một quy trình/ }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Tiếp tục' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Kiểm tra WooCommerce mẫu' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Tiếp tục xác nhận' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Tạo bản nháp trên WooCommerce' }));
-    expect(await screen.findByText(/Sản phẩm vẫn đang bán trên WooCommerce/)).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Chưa thể hoàn tất' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: 'Đã tạo và xác minh bản nháp' })).not.toBeInTheDocument();
   });
 
   it('restores the saved workflow and shows allocation recovery after reopening', async () => {

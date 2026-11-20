@@ -96,6 +96,12 @@ public interface ChannelListingRepository extends JpaRepository<ChannelListing, 
 
     Optional<ChannelListing> findByChannelIdAndExternalVariantId(Long channelId, String externalVariantId);
 
+    long countByChannelId(Long channelId);
+
+    long countByChannelIdAndMappingStatus(Long channelId, ChannelListing.MappingStatus mappingStatus);
+
+    long countByChannelIdAndSyncStatus(Long channelId, ChannelListing.SyncStatus syncStatus);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT l FROM ChannelListing l WHERE l.id = :id")
     Optional<ChannelListing> findByIdForUpdate(@Param("id") Long id);

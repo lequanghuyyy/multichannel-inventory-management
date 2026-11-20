@@ -124,7 +124,14 @@ app:
     woocommerce:
       enabled: ${WOOCOMMERCE_ENABLED:false}
       base-url: ${WOOCOMMERCE_BASE_URL:http://localhost:8090}
-      write-enabled: ${WOOCOMMERCE_PRODUCT_WRITE_ENABLED:false}
+      consumer-key: ${WOOCOMMERCE_CONSUMER_KEY:}
+      consumer-secret: ${WOOCOMMERCE_CONSUMER_SECRET:}
+      # Inventory writes have their own switch; connecting or reading a store never enables them.
+      write-enabled: ${WOOCOMMERCE_INVENTORY_WRITE_ENABLED:false}
+      connect-timeout-ms: ${WOOCOMMERCE_CONNECT_TIMEOUT_MS:3000}
+      read-timeout-ms: ${WOOCOMMERCE_READ_TIMEOUT_MS:10000}
+      allowed-environments: ${WOOCOMMERCE_ALLOWED_ENVIRONMENTS:sandbox,development,test}
+      development-host-allowlist: ${WOOCOMMERCE_DEVELOPMENT_HOST_ALLOWLIST:localhost,127.0.0.1,::1}
     ebay:
       enabled: ${EBAY_ENABLED:false}
       environment: ${EBAY_ENVIRONMENT:sandbox}

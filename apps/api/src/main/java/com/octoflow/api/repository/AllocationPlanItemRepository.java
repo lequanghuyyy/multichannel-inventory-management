@@ -43,4 +43,21 @@ public interface AllocationPlanItemRepository extends JpaRepository<AllocationPl
     boolean existsActiveForListing(@Param("listingId") Long listingId,
                                    @Param("planStatus") AllocationPlan.Status planStatus,
                                    @Param("itemStatuses") Collection<AllocationPlanItem.Status> itemStatuses);
+
+    /**
+     * True when the listing's current allocation target belongs to a plan that was blocked
+     * before delivery. Such a target was never confirmed by the remote read-back, so it must
+     * not be treated as a settled quota by automatic reconciliation.
+     */
+    @Query("""
+            SELECT CASE WHEN COUNT(i) > 0 THEN true ELSE false END
+            FROM AllocationPlanItem i, AllocationPlan p
+            WHERE i.planId = p.id
+              AND i.listingId = :listingId
+              AND p.allocationRevision = :allocationRevision
+              AND p.status = :planStatus
+            """)
+    boolean existsForListingAtRevision(@Param("listingId") Long listingId,
+                                       @Param("allocationRevision") long allocationRevision,
+                                       @Param("planStatus") AllocationPlan.Status planStatus);
 }

@@ -24,6 +24,11 @@ public class SimulatorChannelAdapter implements ChannelInventoryAdapter {
     }
 
     @Override
+    public boolean requiresVerifiedStockBaseline() {
+        return false;
+    }
+
+    @Override
     public RemoteStock readStock(Channel channel, ChannelListing listing) {
         SimulatorStateService.Snapshot snapshot = stateService.readStock(listing.getId());
         return new RemoteStock(snapshot.quantity(), snapshot.version(),

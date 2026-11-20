@@ -4,7 +4,6 @@ import { ApiRequestError } from '../../core/api-error';
 import { ChannelDetailPage } from './ChannelDetailPage';
 import { ChannelsPage } from './ChannelsPage';
 import { ChannelApiMappingLedger } from './components/ChannelApiMappingLedger';
-import { AuthContext } from '../auth/AuthProvider';
 
 afterEach(() => {
   cleanup();
@@ -69,23 +68,6 @@ const { getChannel, getChannelAPICapabilities, listChannels, listChannelMappings
 // mock, which is the kind of thing that costs an afternoon.
 vi.mock('../../api/channels', () => ({ getChannel, getChannelAPICapabilities, listChannels, listChannelMappings }));
 
-const { getWooCommerceStatus, connectWooCommerceStore } = vi.hoisted(() => ({
-  getWooCommerceStatus: vi.fn(),
-  connectWooCommerceStore: vi.fn(),
-}));
-vi.mock('../../api/woocommerce', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../../api/woocommerce')>(),
-  getWooCommerceStatus,
-  connectWooCommerceStore,
-}));
-getWooCommerceStatus.mockResolvedValue({ enabled: false, configured: false, connected: false, connection_status: 'disconnected' });
-
-function renderAdminChannels() {
-  render(<AuthContext.Provider value={{ status: 'authenticated', user: { role: 'ADMIN' } as never, error: null, login: async () => {}, logout: async () => {}, retry: () => {} }}>
-    <ChannelsPage mode="default" />
-  </AuthContext.Provider>);
-}
-
 getChannelAPICapabilities.mockResolvedValue({ capabilities: [], sandbox_skus: [] });
 
 const liveChannel = (overrides: Record<string, unknown> = {}) => ({
@@ -105,25 +87,6 @@ const channelResolves = (overrides: Record<string, unknown> = {}) =>
   getChannel.mockImplementation(() => Promise.resolve(liveChannel(overrides)));
 
 describe('ChannelsPage · live API', () => {
-  it('lets an ADMIN register a WooCommerce website from the existing channels page', async () => {
-    listChannels.mockImplementation(() => Promise.resolve(apiPage([])));
-    getWooCommerceStatus.mockResolvedValue({ enabled: true, configured: true, connected: false, connection_status: 'disconnected' });
-    connectWooCommerceStore.mockResolvedValue({ enabled: true, configured: true, connected: true, connection_status: 'connected', channel_id: '30000000-0000-4000-8000-000000000009' });
-    renderAdminChannels();
-    const connect = await screen.findByRole('button', { name: 'Kết nối website WooCommerce' });
-    fireEvent.click(connect);
-    await waitFor(() => expect(connectWooCommerceStore).toHaveBeenCalledOnce());
-    await waitFor(() => expect(window.location.pathname).toBe('/channels/30000000-0000-4000-8000-000000000009'));
-  });
-
-  it('keeps the WooCommerce registration action disabled until server config is enabled', async () => {
-    listChannels.mockImplementation(() => Promise.resolve(apiPage([])));
-    getWooCommerceStatus.mockResolvedValue({ enabled: false, configured: false, connected: false, connection_status: 'disconnected' });
-    renderAdminChannels();
-    expect(await screen.findByRole('button', { name: 'WooCommerce chưa bật' })).toBeDisabled();
-    expect(screen.getByTitle('Bật WOOCOMMERCE_ENABLED và nhập đủ server secrets trước.')).toBeInTheDocument();
-  });
-
   it('renders the pair (type, environment) so a simulator is not read as a marketplace', async () => {
     listChannels.mockImplementation(() => Promise.resolve(apiPage([
       liveChannel(),
@@ -225,6 +188,30 @@ describe('ChannelDetailPage · live API', () => {
     expect(ledger).toHaveTextContent('Lần thử gần nhất');
     expect(ledger).toHaveTextContent('READBACK_MISMATCH');
     expect(ledger).toHaveTextContent('Có');
+  });
+
+  it('renders a real SYNCED WooCommerce row without a legacy core version', () => {
+    render(<ChannelApiMappingLedger woocommerce mappings={[{
+      id: 'm-woo-synced', channel_id: '30000000-0000-4000-8000-000000000004',
+      variant_id: 'v-woo', external_sku: 'WOO-SKU-A', canonical_sku: 'P06-SKU-A',
+      listed: true, variant_is_active: true, inventory_tracking_enabled: true,
+      mapping_status: 'verified', pushed_version: 3, target_version: 3, target_quantity: 8,
+      pushed_quantity: 8, acknowledged_quantity: null, verified_quantity: 8,
+      reported_quantity: 8, drifted: false, push_state: 'current', quantity_basis: 'ats',
+      latest_sync_status: 'VERIFIED', latest_sync_verified_at: '2026-10-27T05:00:00Z',
+      latest_sync_attempt_at: '2026-10-27T05:00:00Z',
+      latest_sync_requested_available: 8, latest_sync_remote_after: 8,
+      latest_sync_target_version: 3, latest_sync_mutation_acknowledged: null,
+    }]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Chi tiết mapping' }));
+    const ledger = screen.getByRole('table');
+    expect(ledger).toHaveTextContent('VERIFIED · Đã xác minh từ WooCommerce');
+    expect(ledger).not.toHaveTextContent('Phân bổ tồn kho đã cũ');
+    expect(ledger).toHaveTextContent('Mục tiêu / đã gửi / đã xác nhận / đọc lại');
+    expect(ledger).toHaveTextContent('8 / 8 / — / 8');
+    // No PUT acknowledgement was echoed: the panel must say "unknown", not "Không".
+    expect(ledger).toHaveTextContent('WooCommerce nhận mutation');
   });
 
   it('does not call an old Shopify report verified without evidence', async () => {

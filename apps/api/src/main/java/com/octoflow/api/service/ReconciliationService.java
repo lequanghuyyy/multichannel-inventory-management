@@ -3,6 +3,7 @@ package com.octoflow.api.service;
 import com.octoflow.api.adapter.ChannelAdapterException;
 import com.octoflow.api.adapter.ChannelAdapterRouter;
 import com.octoflow.api.adapter.ChannelInventoryAdapter;
+import com.octoflow.api.adapter.WooCommerceReason;
 import com.octoflow.api.dto.response.ChannelSyncEvidenceResponse;
 import com.octoflow.api.entity.Channel;
 import com.octoflow.api.entity.ChannelListing;
@@ -77,10 +78,9 @@ public class ReconciliationService {
 
         ChannelInventoryAdapter adapter;
         try {
-            adapter = adapterRouter.require(channel);
+            adapter = adapterRouter.requireRead(channel);
         } catch (ChannelAdapterException ex) {
-            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE,
-                    "Chưa có connector để đọc và xác minh tồn trên kênh.");
+            throw readFailure(ex, "Chưa có connector để đọc và xác minh tồn trên kênh.");
         }
 
         Optional<ChannelSyncEvidenceResponse> result = listingLeaseService.tryCallWithLock(listing.getId(), () -> {
@@ -88,8 +88,7 @@ public class ReconciliationService {
             try {
                 remote = adapter.readStock(channel, listing);
             } catch (ChannelAdapterException ex) {
-                throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE,
-                        "Không thể đọc tồn trên kênh: " + ex.getMessage());
+                throw readFailure(ex, "Không thể đọc tồn trên kênh.");
             }
             return recorder.applyObservation(listing.getId(), adapter.name(),
                     remote.quantity(), remote.reference());
@@ -106,6 +105,23 @@ public class ReconciliationService {
                 && listing.getMappingVerifiedAt() != null
                 && channel != null
                 && channel.getStatus() == Channel.Status.CONNECTED
-                && adapterRouter.writeAvailable(channel);
+                && adapterRouter.readAvailable(channel);
+    }
+
+    private ApiException readFailure(ChannelAdapterException ex, String prefix) {
+        if (WooCommerceReason.ENVIRONMENT_BLOCKED.equals(ex.reasonCodeOrKind())) {
+            return new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, ErrorCode.CHANNEL_ENVIRONMENT_BLOCKED,
+                    "Phase 06 chỉ cho phép đọc/đối soát WooCommerce ở môi trường development/test.");
+        }
+        HttpStatus status = ex.getKind() == ChannelAdapterException.Kind.TIMEOUT
+                ? HttpStatus.GATEWAY_TIMEOUT
+                : ex.getKind() == ChannelAdapterException.Kind.UNAVAILABLE
+                ? HttpStatus.SERVICE_UNAVAILABLE
+                : HttpStatus.UNPROCESSABLE_ENTITY;
+        ErrorCode code = status == HttpStatus.UNPROCESSABLE_ENTITY
+                ? ErrorCode.MAPPING_VERIFICATION_FAILED
+                : ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE;
+        return new ApiException(status, code,
+                prefix + " (" + ex.reasonCodeOrKind() + "): " + ex.getMessage());
     }
 }

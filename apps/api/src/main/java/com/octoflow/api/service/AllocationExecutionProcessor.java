@@ -1,16 +1,19 @@
 package com.octoflow.api.service;
 
 import com.octoflow.api.adapter.ChannelAdapterException;
+import com.octoflow.api.adapter.ChannelAdapterRouter;
 import com.octoflow.api.entity.AllocationPlan;
 import com.octoflow.api.entity.AllocationPlanItem;
 import com.octoflow.api.entity.Channel;
 import com.octoflow.api.entity.ChannelListing;
+import com.octoflow.api.entity.ChannelSyncEvidence;
 import com.octoflow.api.entity.InventoryBalance;
 import com.octoflow.api.entity.ProductVariant;
 import com.octoflow.api.entity.VariantAllocationState;
 import com.octoflow.api.repository.AllocationPlanItemRepository;
 import com.octoflow.api.repository.AllocationPlanRepository;
 import com.octoflow.api.repository.ChannelListingRepository;
+import com.octoflow.api.repository.ChannelSyncEvidenceRepository;
 import com.octoflow.api.repository.InventoryBalanceRepository;
 import com.octoflow.api.repository.VariantAllocationStateRepository;
 import org.springframework.beans.factory.annotation.Value;
@@ -41,7 +44,10 @@ public class AllocationExecutionProcessor {
     private final InventoryBalanceRepository balanceRepository;
     private final VariantAllocationStateRepository stateRepository;
     private final ChannelDeliveryEligibility eligibility;
+    private final ChannelAdapterRouter adapterRouter;
     private final ChannelEvidenceRecorder evidenceRecorder;
+    private final ChannelSyncEvidenceRepository evidenceRepository;
+    private final StockBaselineService stockBaselineService;
     private final SyncEventBroadcaster broadcaster;
     private final String workerId;
     private final int maxAttempts;
@@ -55,7 +61,10 @@ public class AllocationExecutionProcessor {
                                         InventoryBalanceRepository balanceRepository,
                                         VariantAllocationStateRepository stateRepository,
                                         ChannelDeliveryEligibility eligibility,
+                                        ChannelAdapterRouter adapterRouter,
                                         ChannelEvidenceRecorder evidenceRecorder,
+                                        ChannelSyncEvidenceRepository evidenceRepository,
+                                        StockBaselineService stockBaselineService,
                                         SyncEventBroadcaster broadcaster,
                                         @Value("${app.sync.allocation-max-attempts:5}") int maxAttempts,
                                         @Value("${app.sync.lease-seconds:30}") long leaseSeconds,
@@ -67,7 +76,10 @@ public class AllocationExecutionProcessor {
         this.balanceRepository = balanceRepository;
         this.stateRepository = stateRepository;
         this.eligibility = eligibility;
+        this.adapterRouter = adapterRouter;
         this.evidenceRecorder = evidenceRecorder;
+        this.evidenceRepository = evidenceRepository;
+        this.stockBaselineService = stockBaselineService;
         this.broadcaster = broadcaster;
         this.workerId = "allocation-" + UUID.randomUUID();
         this.maxAttempts = Math.max(1, maxAttempts);
@@ -93,7 +105,8 @@ public class AllocationExecutionProcessor {
                              long mappingVersion,
                              String externalListingId,
                              String externalVariantId,
-                             int attempt) {}
+                             int attempt,
+                             Integer baselineQuantity) {}
 
     @Transactional
     public List<PlanClaim> claimDuePlans(int batch) {
@@ -245,11 +258,12 @@ public class AllocationExecutionProcessor {
                 listing.getMappingVersion(),
                 listing.getExternalListingId(),
                 listing.getExternalVariantId(),
-                item.getAttempts());
+                item.getAttempts(),
+                stockBaselineService.baselineFor(listing));
     }
 
     @Transactional
-    public void applySuccess(PlanAction action, int remoteBefore, int sent, int acknowledged, int verified) {
+    public void applySuccess(PlanAction action, int remoteBefore, int sent, Integer acknowledged, int verified) {
         AllocationPlan plan = planRepository.findByIdForUpdate(action.planId()).orElse(null);
         if (!ownedAndApplying(plan, new PlanClaim(action.planId(), action.claimGeneration()))) {
             return;
@@ -267,7 +281,7 @@ public class AllocationExecutionProcessor {
         }
         if (mappingChanged(action, listing)) {
             evidenceRecorder.record(listing.getId(), null, plan.getId(), item.getId(),
-                    "ALLOCATION_" + item.getDirection().name(), "simulator", "UNCONFIRMED",
+                    "ALLOCATION_" + item.getDirection().name(), adapterName(action.channel()), "UNCONFIRMED",
                     item.getProposedQuota(), sent, acknowledged, verified, remoteBefore, verified,
                     "MAPPING_CHANGED_DURING_WRITE",
                     "Mapping identity changed while the allocation step was running.", action.idempotencyReference());
@@ -308,7 +322,7 @@ public class AllocationExecutionProcessor {
                 plan.getId(),
                 item.getId(),
                 "ALLOCATION_" + item.getDirection().name(),
-                "simulator",
+                adapterName(action.channel()),
                 "VERIFIED",
                 item.getProposedQuota(),
                 sent,
@@ -345,8 +359,60 @@ public class AllocationExecutionProcessor {
                 "refresh_required", true));
     }
 
+    /**
+     * The allocation step was stopped before the PUT because the remote store no longer holds the
+     * last verified quantity. Nothing was written; the item and plan stay blocked until
+     * reconciliation proves where the store actually is.
+     */
     @Transactional
-    public void applyFailure(PlanAction action, ChannelAdapterException.Kind kind, String message) {
+    public void applyPreWriteDrift(PlanAction action, int observedQuantity, int baselineQuantity) {
+        AllocationPlan plan = planRepository.findByIdForUpdate(action.planId()).orElse(null);
+        if (!ownedAndApplying(plan, new PlanClaim(action.planId(), action.claimGeneration()))) {
+            return;
+        }
+        AllocationPlanItem item = itemRepository.findByIdForUpdate(action.itemId()).orElse(null);
+        if (item == null || item.getStatus() != AllocationPlanItem.Status.PENDING
+                && item.getStatus() != AllocationPlanItem.Status.RETRY_PENDING) {
+            return;
+        }
+
+        String message = "Remote stock " + observedQuantity
+                + " differs from the last verified stock " + baselineQuantity
+                + "; the allocation write was blocked and requires reconciliation.";
+        item.setStatus(AllocationPlanItem.Status.BLOCKED);
+        item.setLastError(truncate(message, 500));
+        item.setRemoteBefore(observedQuantity);
+        item.setRemoteAfter(observedQuantity);
+        item.setNextAttemptAt(null);
+        itemRepository.save(item);
+
+        ChannelListing listing = listingRepository.findByIdForUpdate(item.getListingId()).orElse(null);
+        if (listing != null) {
+            listing.setReportedStock(observedQuantity);
+            listing.setSyncStatus(ChannelListing.SyncStatus.OUT_OF_SYNC);
+            listing.setLastSyncError(truncate(message, 500));
+            listingRepository.save(listing);
+        }
+
+        evidenceRecorder.record(item.getListingId(), null, plan.getId(), item.getId(),
+                "ALLOCATION_" + item.getDirection().name(), adapterName(action.channel()), "DRIFT",
+                item.getProposedQuota(), null, null, observedQuantity,
+                observedQuantity, observedQuantity,
+                "UNEXPECTED_REMOTE_STOCK", message, action.idempotencyReference());
+
+        blockPlan(plan, message);
+        broadcaster.broadcastAfterCommit("ALLOCATION_STATE_CHANGED", Map.of(
+                "plan_id", plan.getId(),
+                "item_id", item.getId(),
+                "listing_id", item.getListingId(),
+                "status", item.getStatus().name(),
+                "uncertain", false,
+                "refresh_required", true));
+    }
+
+    @Transactional
+    public void applyFailure(PlanAction action, ChannelAdapterException.Kind kind,
+                             String errorCode, String message, boolean writeAttempted) {
         AllocationPlan plan = planRepository.findByIdForUpdate(action.planId()).orElse(null);
         if (!ownedAndApplying(plan, new PlanClaim(action.planId(), action.claimGeneration()))) {
             return;
@@ -359,7 +425,13 @@ public class AllocationExecutionProcessor {
 
         String safeMessage = truncate(message, 500);
         item.setLastError(safeMessage);
-        boolean blocked = kind == ChannelAdapterException.Kind.UNAVAILABLE || item.getAttempts() >= maxAttempts;
+        // A timeout raised while writing is uncertain: the remote may already hold the new
+        // quantity. Retrying the PUT automatically could publish a second, uninspected change,
+        // so the item is blocked until an independent read-back (reconciliation) resolves it.
+        boolean uncertainWrite = kind == ChannelAdapterException.Kind.TIMEOUT && writeAttempted;
+        boolean blocked = kind == ChannelAdapterException.Kind.UNAVAILABLE
+                || uncertainWrite
+                || item.getAttempts() >= maxAttempts;
         if (blocked) {
             item.setStatus(AllocationPlanItem.Status.BLOCKED);
             item.setNextAttemptAt(null);
@@ -376,7 +448,7 @@ public class AllocationExecutionProcessor {
                 plan.getId(),
                 item.getId(),
                 "ALLOCATION_" + item.getDirection().name(),
-                "simulator",
+                adapterName(action.channel()),
                 evidenceStatus,
                 item.getProposedQuota(),
                 item.getSentQuantity(),
@@ -384,7 +456,7 @@ public class AllocationExecutionProcessor {
                 item.getVerifiedQuantity(),
                 item.getRemoteBefore(),
                 item.getRemoteAfter(),
-                kind.name(),
+                errorCode,
                 safeMessage,
                 action.idempotencyReference());
 
@@ -402,6 +474,128 @@ public class AllocationExecutionProcessor {
                 "status", item.getStatus().name(),
                 "uncertain", kind == ChannelAdapterException.Kind.TIMEOUT,
                 "refresh_required", true));
+    }
+
+    /**
+     * Reconciliation read the channel and found exactly the quantity a blocked step intended to
+     * publish. For an uncertain write (timeout) or a pre-write drift block, that read is the
+     * missing proof. The item is adopted from the remote observation, never by re-sending a PUT.
+     *
+     * The plan is only completed when every remaining item is verified and the published total
+     * still fits ATS. If another item is blocked it stays blocked; if work remains the plan is
+     * returned to APPLYING so the normal decrease-before-increase and budget checks run again.
+     */
+    @Transactional
+    public int recoverBlockedItemsFromReconciliation(ChannelListing listing,
+                                                     int remoteQuantity,
+                                                     String adapterName,
+                                                     String reference) {
+        if (listing == null || listing.getId() == null) {
+            return 0;
+        }
+        List<Long> planIds = planRepository.findBlockedPlanIdsForListingAtRevision(
+                listing.getId(), listing.getTargetAllocationRevision());
+        int adopted = 0;
+        for (Long planId : planIds) {
+            if (recoverPlanFromObservation(planId, listing, remoteQuantity, adapterName, reference)) {
+                adopted++;
+            }
+        }
+        return adopted;
+    }
+
+    private boolean recoverPlanFromObservation(Long planId, ChannelListing listing,
+                                               int remoteQuantity, String adapterName, String reference) {
+        AllocationPlan plan = planRepository.findByIdForUpdate(planId).orElse(null);
+        if (plan == null || plan.getStatus() != AllocationPlan.Status.BLOCKED) {
+            return false;
+        }
+        List<AllocationPlanItem> items = itemRepository.findByPlanIdOrderByChannelIdAscIdAsc(planId);
+        AllocationPlanItem item = items.stream()
+                .filter(row -> Objects.equals(row.getListingId(), listing.getId()))
+                .filter(row -> row.getStatus() == AllocationPlanItem.Status.BLOCKED)
+                .findFirst().orElse(null);
+        if (item == null
+                || item.getProposedQuota() != remoteQuantity
+                || item.getCurrentQuota() != listing.getAllocatedQuota()) {
+            return false;
+        }
+        ChannelSyncEvidence latest = evidenceRepository
+                .findFirstByPlanItemIdOrderByObservedAtDescIdDesc(item.getId()).orElse(null);
+        if (!recoverableObservation(latest)) {
+            return false;
+        }
+
+        item.setStatus(AllocationPlanItem.Status.VERIFIED);
+        item.setVerifiedQuantity(remoteQuantity);
+        item.setRemoteAfter(remoteQuantity);
+        item.setVerifiedAt(Instant.now());
+        item.setLastError(null);
+        item.setNextAttemptAt(null);
+        itemRepository.save(item);
+
+        listing.setAllocatedQuota(item.getProposedQuota());
+        listing.setReportedStock(remoteQuantity);
+        listing.setSentQuantity(item.getSentQuantity());
+        listing.setAcknowledgedQuantity(item.getAcknowledgedQuantity());
+        listing.setVerifiedQuantity(remoteQuantity);
+        listing.setLastVerifiedAt(Instant.now());
+        listing.setSyncStatus(ChannelListing.SyncStatus.SYNCED);
+        listing.setLastSyncError(null);
+        listing.setTargetAllocationRevision(plan.getAllocationRevision());
+        listingRepository.save(listing);
+
+        evidenceRecorder.record(listing.getId(), null, plan.getId(), item.getId(),
+                "ALLOCATION_" + item.getDirection().name(), adapterName, "VERIFIED",
+                item.getProposedQuota(), item.getSentQuantity(), item.getAcknowledgedQuantity(),
+                remoteQuantity, item.getRemoteBefore(), remoteQuantity, null,
+                "Resolved by reconciliation read-back.", reference);
+
+        boolean blocked = items.stream()
+                .anyMatch(row -> row.getStatus() == AllocationPlanItem.Status.BLOCKED);
+        if (blocked) {
+            // Another channel still needs an operator; the plan must not run further steps.
+            return true;
+        }
+        if (items.stream().allMatch(row -> row.getStatus() == AllocationPlanItem.Status.VERIFIED)) {
+            if (publishedTotalExceedsAts(plan)) {
+                listing.setSyncStatus(ChannelListing.SyncStatus.OUT_OF_SYNC);
+                listing.setLastSyncError("ATS dropped below the published allocation total; reconciliation required.");
+                listingRepository.save(listing);
+                blockPlan(plan, "ATS hiện tại thấp hơn tổng quota đã công bố; cần đối soát và giảm tồn.");
+            } else {
+                finishPlan(plan, items);
+            }
+            return true;
+        }
+
+        plan.setStatus(AllocationPlan.Status.APPLYING);
+        plan.setLastError(null);
+        plan.setCompletedAt(null);
+        plan.setLeaseOwner(null);
+        plan.setLeaseUntil(null);
+        planRepository.save(plan);
+        broadcaster.broadcastAfterCommit("ALLOCATION_STATE_CHANGED", Map.of(
+                "plan_id", plan.getId(),
+                "item_id", item.getId(),
+                "listing_id", item.getListingId(),
+                "status", plan.getStatus().name(),
+                "refresh_required", true));
+        return true;
+    }
+
+    private boolean recoverableObservation(ChannelSyncEvidence evidence) {
+        if (evidence == null) {
+            return false;
+        }
+        if ("DRIFT".equals(evidence.getStatus())) {
+            return "UNEXPECTED_REMOTE_STOCK".equals(evidence.getErrorCode());
+        }
+        if (!"UNCONFIRMED".equals(evidence.getStatus())) {
+            return false;
+        }
+        String code = evidence.getErrorCode();
+        return "TIMEOUT".equals(code) || (code != null && code.endsWith("_TIMEOUT"));
     }
 
     @Transactional
@@ -470,7 +664,7 @@ public class AllocationExecutionProcessor {
             item.setNextAttemptAt(null);
             itemRepository.save(item);
             evidenceRecorder.record(item.getListingId(), null, plan.getId(), item.getId(),
-                    "ALLOCATION_INCREASE", "simulator", "ERROR", item.getProposedQuota(),
+                    "ALLOCATION_INCREASE", adapterName(item.getListingId()), "ERROR", item.getProposedQuota(),
                     item.getSentQuantity(), item.getAcknowledgedQuantity(), item.getVerifiedQuantity(),
                     item.getRemoteBefore(), item.getRemoteAfter(), errorCode, reason, null);
         }
@@ -531,7 +725,7 @@ public class AllocationExecutionProcessor {
                 plan.getId(),
                 item.getId(),
                 "ALLOCATION_" + item.getDirection().name(),
-                "simulator",
+                adapterName(item.getListingId()),
                 "ERROR",
                 item.getProposedQuota(),
                 item.getSentQuantity(),
@@ -549,6 +743,18 @@ public class AllocationExecutionProcessor {
         planRepository.releaseLease(plan.getId(), workerId, claim.claimGeneration());
     }
 
+    /** Evidence label for the connector even when the write is blocked before routing. */
+    private String adapterName(Channel channel) {
+        return channel == null ? "none" : adapterRouter.adapterName(channel);
+    }
+
+    private String adapterName(Long listingId) {
+        ChannelListing listing = listingId == null ? null
+                : listingRepository.findById(listingId).orElse(null);
+        return listing == null || listing.getChannel() == null
+                ? "none" : adapterRouter.adapterName(listing.getChannel());
+    }
+
     private Channel snapshotChannel(Channel channel) {
         Channel copy = new Channel();
         copy.setId(channel.getId());
@@ -556,6 +762,14 @@ public class AllocationExecutionProcessor {
         copy.setName(channel.getName());
         copy.setEnvironment(channel.getEnvironment());
         copy.setStatus(channel.getStatus());
+        // Adapter I/O runs outside this transaction, so the snapshot must carry the same
+        // connection proof that eligibility saw. Without it every real connector is blocked.
+        copy.setConnectorName(channel.getConnectorName());
+        copy.setConnectorVersion(channel.getConnectorVersion());
+        copy.setConnectionVerifiedAt(channel.getConnectionVerifiedAt());
+        copy.setConnectionProductsRead(channel.isConnectionProductsRead());
+        copy.setConnectionAuthMode(channel.getConnectionAuthMode());
+        copy.setConnectionTargetFingerprint(channel.getConnectionTargetFingerprint());
         return copy;
     }
 

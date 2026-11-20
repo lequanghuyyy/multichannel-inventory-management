@@ -3,6 +3,7 @@ package com.octoflow.api.service.impl;
 import com.octoflow.api.adapter.ChannelAdapterException;
 import com.octoflow.api.adapter.ChannelAdapterRouter;
 import com.octoflow.api.adapter.ChannelInventoryAdapter;
+import com.octoflow.api.adapter.WooCommerceReason;
 import com.octoflow.api.dto.request.RegisterChannelMappingRequest;
 import com.octoflow.api.dto.request.VerifyChannelMappingRequest;
 import com.octoflow.api.dto.response.ChannelListingResponse;
@@ -117,6 +118,7 @@ public class ChannelServiceImpl implements ChannelService {
             throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "external_listing_id tối đa 128 ký tự.");
         }
         String externalSku = trimToNull(request.externalSku());
+        boolean explicitExternalSku = externalSku != null;
         if (externalSku == null) {
             externalSku = variant.getSku();
         }
@@ -126,6 +128,9 @@ public class ChannelServiceImpl implements ChannelService {
         String externalVariantId = trimToNull(request.externalVariantId());
         if (externalVariantId != null && externalVariantId.length() > 128) {
             throw new BusinessRuleException(ErrorCode.BAD_REQUEST, "external_variant_id tối đa 128 ký tự.");
+        }
+        if ("woocommerce".equalsIgnoreCase(channel.getCode())) {
+            requireWooCommerceIdentity(externalListingId, externalVariantId, externalSku, explicitExternalSku);
         }
 
         ChannelListing listing = channelListingRepository.findByChannelIdAndVariantIdForUpdate(channelId, variant.getId())
@@ -180,6 +185,27 @@ public class ChannelServiceImpl implements ChannelService {
         return channelMapper.toListingResponse(saved);
     }
 
+    /**
+     * WooCommerce mappings use numeric REST identifiers. The SKU must be entered explicitly so a
+     * defaulted Core SKU can never be mistaken for proof that the remote item carries that SKU;
+     * the adapter still compares it with the live store during verification.
+     */
+    private void requireWooCommerceIdentity(String externalListingId, String externalVariantId,
+                                            String externalSku, boolean explicitExternalSku) {
+        if (!externalListingId.matches("\\d{1,20}")) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                    "external_listing_id của WooCommerce phải là ID sản phẩm dạng số.");
+        }
+        if (externalVariantId != null && !externalVariantId.matches("\\d{1,20}")) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                    "external_variant_id của WooCommerce phải là ID biến thể dạng số.");
+        }
+        if (!explicitExternalSku || externalSku == null || externalSku.isBlank()) {
+            throw new BusinessRuleException(ErrorCode.BAD_REQUEST,
+                    "Cần nhập external_sku chính xác của WooCommerce khi đăng ký mapping.");
+        }
+    }
+
     private void blockUnsafeRemap(ChannelListing listing) {
         if (listing.getAllocatedQuota() > 0) {
             throw new BusinessRuleException(ErrorCode.MAPPING_REMAP_BLOCKED,
@@ -227,34 +253,25 @@ public class ChannelServiceImpl implements ChannelService {
                         "external_variant_id xác minh không khớp với mapping đã đăng ký.");
             }
         }
-        if (channel.getStatus() != Channel.Status.CONNECTED) {
-            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE,
-                    "Kênh chưa CONNECTED nên không thể xác minh mapping.");
-        }
+        requireVerifiableChannel(channel);
 
         ChannelInventoryAdapter adapter;
         try {
-            adapter = adapterRouter.require(channel);
+            adapter = adapterRouter.requireRead(channel);
         } catch (ChannelAdapterException ex) {
-            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE,
-                    "Chưa có connector để xác minh mapping trên kênh.");
+            throw adapterUnavailable(ex, "Chưa có connector để xác minh mapping trên kênh.");
         }
 
         return listingLeaseService.tryCallWithLock(listingId, () -> {
             ChannelListing current = channelListingRepository.findDetailedByChannelIdAndId(channelId, listingId)
                     .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.MAPPING_NOT_FOUND,
                             "Không tìm thấy liên kết #" + listingId + " thuộc kênh #" + channelId));
-            if (current.getChannel() == null
-                    || current.getChannel().getStatus() != Channel.Status.CONNECTED) {
-                throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE,
-                        "Kênh chưa CONNECTED nên không thể xác minh mapping.");
-            }
+            requireVerifiableChannel(current.getChannel());
             ChannelInventoryAdapter.MappingSnapshot snapshot;
             try {
                 snapshot = adapter.verifyMapping(channel, current);
             } catch (ChannelAdapterException ex) {
-                throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE,
-                        "Không thể xác minh mapping: " + ex.getMessage());
+                throw mappingVerificationFailure(ex);
             }
             return mappingRecorder.applyVerified(channelId, listingId, adapter.name(),
                     current.getMappingVersion(),
@@ -275,6 +292,45 @@ public class ChannelServiceImpl implements ChannelService {
     @Override
     public ChannelSyncEvidenceResponse reconcileListing(Long channelId, Long listingId) {
         return reconciliationService.reconcileListing(channelId, listingId);
+    }
+
+    private void requireVerifiableChannel(Channel channel) {
+        if (channel == null || channel.getStatus() != Channel.Status.CONNECTED) {
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE,
+                    "Kênh chưa CONNECTED nên không thể xác minh mapping.");
+        }
+        if ("woocommerce".equalsIgnoreCase(channel.getCode())
+                && channel.getConnectionVerifiedAt() == null) {
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE,
+                    "Kết nối WooCommerce chưa được xác minh qua API ("
+                            + WooCommerceReason.CONNECTION_NOT_VERIFIED + ").");
+        }
+    }
+
+    private ApiException adapterUnavailable(ChannelAdapterException ex, String fallback) {
+        if (WooCommerceReason.ENVIRONMENT_BLOCKED.equals(ex.reasonCodeOrKind())) {
+            return new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, ErrorCode.CHANNEL_ENVIRONMENT_BLOCKED,
+                    "Phase 06 chỉ cho phép kênh WooCommerce ở môi trường development/test.");
+        }
+        String message = ex.getMessage() == null || ex.getMessage().isBlank()
+                ? fallback
+                : fallback + " (" + ex.reasonCodeOrKind() + "): " + ex.getMessage();
+        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE, message);
+    }
+
+    private ApiException mappingVerificationFailure(ChannelAdapterException ex) {
+        HttpStatus status = switch (ex.getKind()) {
+            case UNAVAILABLE -> HttpStatus.SERVICE_UNAVAILABLE;
+            case TIMEOUT -> HttpStatus.GATEWAY_TIMEOUT;
+            default -> HttpStatus.UNPROCESSABLE_ENTITY;
+        };
+        ErrorCode code = status == HttpStatus.SERVICE_UNAVAILABLE
+                ? ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE
+                : status == HttpStatus.GATEWAY_TIMEOUT
+                ? ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE
+                : ErrorCode.MAPPING_VERIFICATION_FAILED;
+        String message = "Không thể xác minh mapping (" + ex.reasonCodeOrKind() + "): " + ex.getMessage();
+        return new ApiException(status, code, message);
     }
 
     private String trimToNull(String value) {

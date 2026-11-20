@@ -71,6 +71,17 @@ const syncErrorLabels: Record<string, string> = {
   READBACK_RATE_LIMITED: 'Shopify đã nhận thay đổi; read-back đang chờ API capacity',
   READBACK_UNVERIFIED: 'Chưa hoàn tất xác minh độc lập',
   RETRY_DEFERRED: 'Yêu cầu đã được dời sang lần thử tiếp theo',
+  WOO_DISABLED: 'Connector WooCommerce đang tắt',
+  WOO_NOT_CONFIGURED: 'Chưa cấu hình URL hoặc thông tin xác thực WooCommerce',
+  WOO_WRITE_DISABLED: 'Cờ ghi tồn WooCommerce đang tắt',
+  WOO_CONNECTION_NOT_VERIFIED: 'Kết nối WooCommerce chưa được xác minh',
+  WOO_STORE_TARGET_CHANGED: 'Store WooCommerce đã đổi; cần kết nối và xác minh lại mapping',
+  WOO_TIMEOUT: 'WooCommerce không phản hồi kịp; kết quả cần đọc lại',
+  WOO_CONNECTION_LOST: 'Mất kết nối WooCommerce sau khi gửi; kết quả cần đọc lại',
+  WOO_HTTP_ERROR: 'WooCommerce trả lỗi HTTP',
+  WOO_AUTH_FAILED: 'WooCommerce từ chối thông tin xác thực',
+  WOO_SKU_MISMATCH: 'SKU WooCommerce không khớp mapping',
+  WOO_STOCK_MANAGEMENT_DISABLED: 'WooCommerce chưa bật quản lý tồn cho sản phẩm',
 };
 
 function number(value: number | null | undefined): string {
@@ -86,18 +97,29 @@ function syncEvidence(mapping: ChannelMapping, provider = 'Shopify'): { label: s
   if (mapping.mapping_status !== 'verified' || mapping.quantity_basis !== 'ats') {
     return { label: 'UNVERIFIED · Mapping tồn kho chưa được xác minh', tone: 'warning' };
   }
-  if (mapping.core_version == null || mapping.target_version !== mapping.core_version || mapping.target_quantity == null) {
+  // Version matching is only meaningful for rows written by the legacy ledger. The live API
+  // reports the listing revision, not a core version, and requiring one would label every
+  // correctly SYNCED WooCommerce row as stale.
+  if (mapping.core_version != null
+      && (mapping.target_version !== mapping.core_version || mapping.target_quantity == null)) {
     return { label: 'PENDING · Phân bổ tồn kho đã cũ', tone: 'warning' };
   }
-  if (mapping.latest_sync_target_version !== mapping.target_version || mapping.latest_sync_core_version !== mapping.core_version ||
-      mapping.latest_sync_requested_available !== mapping.target_quantity) {
+  if (mapping.core_version != null
+      && (mapping.latest_sync_target_version !== mapping.target_version || mapping.latest_sync_core_version !== mapping.core_version)) {
+    return { label: 'SUPERSEDED · Lần thử thuộc phiên bản cũ', tone: 'warning' };
+  }
+  if (mapping.latest_sync_requested_available != null && mapping.target_quantity != null
+      && mapping.latest_sync_requested_available !== mapping.target_quantity) {
     return { label: 'SUPERSEDED · Lần thử thuộc phiên bản cũ', tone: 'warning' };
   }
   switch (mapping.latest_sync_status) {
-    case 'VERIFIED':
-      if (!mapping.latest_sync_verified_at || mapping.latest_sync_remote_after == null) return { label: 'UNVERIFIED · Thiếu read-back', tone: 'warning' };
-      if (mapping.latest_sync_remote_after !== mapping.latest_sync_requested_available) return { label: `MISMATCH · ${provider} khác mục tiêu`, tone: 'danger' };
+    case 'VERIFIED': {
+      const readBack = mapping.latest_sync_remote_after ?? mapping.verified_quantity ?? null;
+      const expected = mapping.target_quantity ?? mapping.latest_sync_requested_available;
+      if (!mapping.latest_sync_verified_at || readBack == null) return { label: 'UNVERIFIED · Thiếu read-back', tone: 'warning' };
+      if (expected != null && readBack !== expected) return { label: `MISMATCH · ${provider} khác mục tiêu`, tone: 'danger' };
       return { label: `VERIFIED · Đã xác minh từ ${provider}`, tone: 'success' };
+    }
     case 'MISMATCH': return { label: `${provider} báo sai số`, tone: 'danger' };
     case 'UNVERIFIED': return { label: 'Chưa xác minh', tone: 'warning' };
     case 'DEFERRED': return {
@@ -270,11 +292,12 @@ export function ChannelApiMappingLedger({
                         <Identifier label="Location GID" value={mapping.external_location_id} />
                         <div><dt className="text-graphite">Bằng chứng đồng bộ tồn kho</dt><dd className="mt-0.5"><StatusBadge tone={syncEvidence(mapping, provider).tone}>{syncEvidence(mapping, provider).label}</StatusBadge></dd></div>
                         <div><dt className="text-graphite">Lần thử gần nhất</dt><dd className="mt-0.5 font-mono text-on-surface">{formatDate(mapping.latest_sync_attempt_at)}</dd></div>
-                        <div><dt className="text-graphite">Yêu cầu / Shopify đọc lại</dt><dd className="mt-0.5 font-mono tabular-nums text-on-surface">{number(mapping.latest_sync_requested_available)} / {number(mapping.latest_sync_remote_after)}</dd></div>
+                        <div><dt className="text-graphite">Mục tiêu / đã gửi / đã xác nhận / đọc lại</dt><dd className="mt-0.5 font-mono tabular-nums text-on-surface">{number(mapping.target_quantity)} / {number(mapping.pushed_quantity)} / {number(mapping.acknowledged_quantity)} / {number(mapping.verified_quantity ?? mapping.latest_sync_remote_after)}</dd></div>
+                        <div><dt className="text-graphite">Yêu cầu / {woocommerce ? 'WooCommerce' : 'Shopify'} đọc lại</dt><dd className="mt-0.5 font-mono tabular-nums text-on-surface">{number(mapping.latest_sync_requested_available)} / {number(mapping.latest_sync_remote_after)}</dd></div>
                         <div><dt className="text-graphite">Phiên bản Core / listing</dt><dd className="mt-0.5 font-mono tabular-nums text-on-surface">{mapping.latest_sync_core_version ?? '—'} / {mapping.latest_sync_target_version ?? '—'}</dd></div>
                         <div><dt className="text-graphite">Xác minh thành công gần nhất</dt><dd className="mt-0.5 font-mono text-on-surface">{formatDate(mapping.latest_sync_verified_at)}</dd></div>
-                        <div><dt className="text-graphite">Shopify nhận mutation</dt><dd className="mt-0.5 text-on-surface">{mapping.latest_sync_mutation_acknowledged == null ? '—' : mapping.latest_sync_mutation_acknowledged ? 'Có' : 'Không'}</dd></div>
-                        {mapping.latest_sync_error_code ? <div><dt className="text-graphite">Lý do lần thử gần nhất</dt><dd className="mt-0.5 break-words text-on-surface">{syncErrorLabels[mapping.latest_sync_error_code] ?? 'Shopify chưa xác nhận lần thử này'} <code className="font-mono text-caption text-graphite">({mapping.latest_sync_error_code})</code></dd></div> : null}
+                        <div><dt className="text-graphite">{woocommerce ? 'WooCommerce nhận mutation' : 'Shopify nhận mutation'}</dt><dd className="mt-0.5 text-on-surface">{mapping.latest_sync_mutation_acknowledged == null ? '—' : mapping.latest_sync_mutation_acknowledged ? 'Có' : 'Không'}</dd></div>
+                        {mapping.latest_sync_error_code ? <div><dt className="text-graphite">Lý do lần thử gần nhất</dt><dd className="mt-0.5 break-words text-on-surface">{syncErrorLabels[mapping.latest_sync_error_code] ?? 'Chưa có mô tả cho mã lỗi này'} <code className="font-mono text-caption text-graphite">({mapping.latest_sync_error_code})</code></dd></div> : null}
                         <div><dt className="text-graphite">SKU · tracking · xác minh</dt><dd className="mt-0.5 break-all font-mono text-on-surface">{mapping.external_sku} · {mapping.inventory_tracking_enabled ? 'tracking bật' : 'tracking chưa xác minh'} · {formatDate(mapping.last_verified_at)}</dd></div>
                         {woocommerce ? <><div><dt className="text-graphite">WooCommerce last remote revision</dt><dd className="mt-0.5 break-all font-mono text-on-surface">{mapping.woocommerce_remote_revision ?? 'Chưa quan sát'} · {formatDate(mapping.woocommerce_remote_observed_at)}</dd></div><div><dt className="text-graphite">Stock management</dt><dd className="mt-0.5 text-on-surface">{mapping.inventory_tracking_enabled ? 'Đang quản lý tồn' : 'Chưa xác minh hoặc tắt'}</dd></div></> : null}
                         {mapping.issue_reason ? <div><dt className="text-graphite">Lý do</dt><dd className="mt-0.5 break-words text-on-surface">{issueLabels[mapping.issue_reason] ?? mapping.issue_reason}</dd></div> : null}

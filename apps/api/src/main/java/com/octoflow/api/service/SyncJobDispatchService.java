@@ -52,7 +52,7 @@ public class SyncJobDispatchService {
                 log.error("Sync job #{} failed unexpectedly: {}", claim.jobId(), ex.getMessage(), ex);
                 try {
                     processor.completeFailure(claim, ChannelAdapterException.Kind.PROTOCOL,
-                            "Unexpected sync worker error: " + ex.getMessage());
+                            "UNEXPECTED_WORKER_ERROR", "Unexpected sync worker error: " + ex.getMessage());
                 } catch (RuntimeException nested) {
                     log.error("Unable to record sync job failure #{}: {}", claim.jobId(),
                             nested.getMessage(), nested);
@@ -85,11 +85,27 @@ public class SyncJobDispatchService {
         try {
             adapter = adapterRouter.require(snapshot.channel());
         } catch (ChannelAdapterException ex) {
-            processor.completeFailure(snapshot, ex.getKind(), ex.getMessage());
+            processor.completeFailure(snapshot, ex.getKind(), ex.reasonCodeOrKind(), ex.getMessage());
             return true;
         }
         try {
             ChannelInventoryAdapter.RemoteStock before = adapter.readStock(snapshot.channel(), snapshot.listing());
+            if (adapter.requiresVerifiedStockBaseline()) {
+                Integer baseline = snapshot.baselineQuantity();
+                if (baseline == null) {
+                    // A real channel must never receive an absolute target without proof of the
+                    // quantity it held when this target was produced. Reconciliation establishes
+                    // the missing evidence; until then the job fails closed without a PUT.
+                    processor.completeFailure(snapshot, ChannelAdapterException.Kind.UNAVAILABLE,
+                            "NO_STOCK_BASELINE",
+                            "No verified remote stock baseline exists for this listing; reconcile before syncing.");
+                    return true;
+                }
+                if (before.quantity() != baseline) {
+                    processor.completePreWriteDrift(snapshot, before.quantity(), baseline);
+                    return true;
+                }
+            }
             ChannelInventoryAdapter.DeliveryReceipt receipt = adapter.writeStock(
                     snapshot.channel(), snapshot.listing(), snapshot.targetQuantity(),
                     snapshot.idempotencyReference());
@@ -99,10 +115,10 @@ public class SyncJobDispatchService {
             processor.completeSuccess(snapshot, before.quantity(),
                     receipt.sentQuantity(), receipt.acknowledgedQuantity(), after.quantity());
         } catch (ChannelAdapterException ex) {
-            processor.completeFailure(snapshot, ex.getKind(), ex.getMessage());
+            processor.completeFailure(snapshot, ex.getKind(), ex.reasonCodeOrKind(), ex.getMessage());
         } catch (RuntimeException ex) {
             processor.completeFailure(snapshot, ChannelAdapterException.Kind.PROTOCOL,
-                    "Unexpected adapter error: " + ex.getMessage());
+                    "UNEXPECTED_ADAPTER_ERROR", "Unexpected adapter error: " + ex.getMessage());
         }
         return true;
     }

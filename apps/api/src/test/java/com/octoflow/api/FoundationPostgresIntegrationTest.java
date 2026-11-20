@@ -130,7 +130,7 @@ class FoundationPostgresIntegrationTest {
 
     @Test
     void cleanPostgresRunsAllMigrationsAndJPAValidatesTheSchema() {
-        assertEquals(9, flyway.info().applied().length);
+        assertEquals(11, flyway.info().applied().length);
         assertTrue(jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'idempotency_records'", Integer.class) == 1);
         assertTrue(jdbcTemplate.queryForObject(
@@ -175,6 +175,8 @@ class FoundationPostgresIntegrationTest {
                 "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_allocation_plan_active_variant'", Integer.class) == 1);
         assertTrue(jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'uq_sync_job_active_listing'", Integer.class) == 1);
+        assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'channels' AND column_name = 'connection_verified_at'", Integer.class) == 1);
         assertEquals(0, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM users", Integer.class));
     }
 
