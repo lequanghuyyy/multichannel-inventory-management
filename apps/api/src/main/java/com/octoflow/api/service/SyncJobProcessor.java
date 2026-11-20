@@ -41,6 +41,7 @@ public class SyncJobProcessor {
     private final ChannelDeliveryEligibility eligibility;
     private final ChannelAdapterRouter adapterRouter;
     private final ChannelEvidenceRecorder evidenceRecorder;
+    private final StockBaselineService stockBaselineService;
     private final SyncEventBroadcaster broadcaster;
     private final String workerId;
     private final int maxAttempts;
@@ -53,6 +54,7 @@ public class SyncJobProcessor {
                             ChannelDeliveryEligibility eligibility,
                             ChannelAdapterRouter adapterRouter,
                             ChannelEvidenceRecorder evidenceRecorder,
+                            StockBaselineService stockBaselineService,
                             SyncEventBroadcaster broadcaster,
                             @Value("${app.sync.max-attempts:8}") int maxAttempts,
                             @Value("${app.sync.retry-base-ms:500}") long retryBaseMs,
@@ -63,6 +65,7 @@ public class SyncJobProcessor {
         this.eligibility = eligibility;
         this.adapterRouter = adapterRouter;
         this.evidenceRecorder = evidenceRecorder;
+        this.stockBaselineService = stockBaselineService;
         this.broadcaster = broadcaster;
         this.workerId = "sync-job-" + UUID.randomUUID();
         this.maxAttempts = Math.max(1, maxAttempts);
@@ -86,6 +89,7 @@ public class SyncJobProcessor {
                                   int attempt,
                                   String adapterName,
                                   String idempotencyReference,
+                                  Integer baselineQuantity,
                                   Channel channel,
                                   ChannelListing listing) {}
 
@@ -188,6 +192,7 @@ public class SyncJobProcessor {
                 job.getAttempts(),
                 adapter.name(),
                 reference,
+                stockBaselineService.baselineFor(listing),
                 snapshotChannel(channel),
                 snapshotListing(listing, channel));
     }
@@ -264,6 +269,54 @@ public class SyncJobProcessor {
                 "listing_id", listing.getId(),
                 "status", job.getStatus().name(),
                 "verified", matches,
+                "refresh_required", true));
+    }
+
+    /**
+     * The remote quantity no longer matches the quantity OctoFlow last verified. The target was
+     * therefore not sent: publishing it would overwrite an external stock change (for example a
+     * sale WooCommerce has not reported yet). The job stays in DRIFT until reconciliation proves
+     * whether the store already holds the target.
+     */
+    @Transactional
+    public void completePreWriteDrift(SyncJobSnapshot snapshot, int observedQuantity, int baselineQuantity) {
+        ChannelListing listing = listingRepository.findByIdForUpdate(snapshot.listingId()).orElse(null);
+        SyncJob job = jobRepository.findByIdForUpdate(snapshot.jobId()).orElse(null);
+        if (!ownedAndProcessing(job, claimOf(snapshot))) {
+            return;
+        }
+        String message = "Remote stock " + observedQuantity
+                + " differs from the last verified stock " + baselineQuantity
+                + "; the write was blocked and requires reconciliation.";
+        job.setStatus(SyncJob.Status.DRIFT);
+        job.setLastError(truncate(message, 500));
+        job.setAdapter(snapshot.adapterName());
+        job.setRemoteBefore(observedQuantity);
+        job.setRemoteAfter(observedQuantity);
+        job.setVerifiedQuantity(observedQuantity);
+        job.setVerifiedAt(Instant.now());
+        job.setLeaseOwner(null);
+        job.setLeaseUntil(null);
+        jobRepository.save(job);
+
+        if (listing != null) {
+            listing.setReportedStock(observedQuantity);
+            listing.setSyncStatus(ChannelListing.SyncStatus.OUT_OF_SYNC);
+            listing.setLastSyncError(truncate(message, 500));
+            listingRepository.save(listing);
+        }
+
+        evidenceRecorder.record(snapshot.listingId(), snapshot.jobId(), null, null,
+                "INVENTORY_SYNC", snapshot.adapterName(), "DRIFT",
+                snapshot.targetQuantity(), null, null, observedQuantity,
+                observedQuantity, observedQuantity,
+                "UNEXPECTED_REMOTE_STOCK", message, snapshot.idempotencyReference());
+
+        broadcaster.broadcastAfterCommit("SYNC_JOB_UPDATED", Map.of(
+                "job_id", job.getId(),
+                "listing_id", job.getListingId(),
+                "status", job.getStatus().name(),
+                "uncertain", false,
                 "refresh_required", true));
     }
 

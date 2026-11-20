@@ -12,6 +12,15 @@ public interface ChannelInventoryAdapter {
 
     String name();
 
+    /**
+     * Real connectors must prove the remote quantity still matches the last verified stock before
+     * publishing an absolute target. The simulator is stateless towards external sales, so it keeps
+     * its Phase 04 self-recovery behaviour.
+     */
+    default boolean requiresVerifiedStockBaseline() {
+        return true;
+    }
+
     RemoteStock readStock(Channel channel, ChannelListing listing) throws ChannelAdapterException;
 
     DeliveryReceipt writeStock(Channel channel, ChannelListing listing,

@@ -90,6 +90,22 @@ public class SyncJobDispatchService {
         }
         try {
             ChannelInventoryAdapter.RemoteStock before = adapter.readStock(snapshot.channel(), snapshot.listing());
+            if (adapter.requiresVerifiedStockBaseline()) {
+                Integer baseline = snapshot.baselineQuantity();
+                if (baseline == null) {
+                    // A real channel must never receive an absolute target without proof of the
+                    // quantity it held when this target was produced. Reconciliation establishes
+                    // the missing evidence; until then the job fails closed without a PUT.
+                    processor.completeFailure(snapshot, ChannelAdapterException.Kind.UNAVAILABLE,
+                            "NO_STOCK_BASELINE",
+                            "No verified remote stock baseline exists for this listing; reconcile before syncing.");
+                    return true;
+                }
+                if (before.quantity() != baseline) {
+                    processor.completePreWriteDrift(snapshot, before.quantity(), baseline);
+                    return true;
+                }
+            }
             ChannelInventoryAdapter.DeliveryReceipt receipt = adapter.writeStock(
                     snapshot.channel(), snapshot.listing(), snapshot.targetQuantity(),
                     snapshot.idempotencyReference());

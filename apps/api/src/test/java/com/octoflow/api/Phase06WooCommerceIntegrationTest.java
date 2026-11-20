@@ -439,12 +439,157 @@ class Phase06WooCommerceIntegrationTest {
     }
 
     @Test
+    void anExternalStockDropIsNeverOverwrittenByASyncJob() throws Exception {
+        Long channelId = verifiedChannel();
+        Fixture fixture = fixture(20);
+        STORE.stock = 8;
+        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
+        setQuota(listingId, 8);
+
+        // A shopper bought two units directly on WooCommerce; OctoFlow has not imported the order.
+        STORE.stock = 6;
+
+        inventoryService.adjustInventory(
+                new InventoryAdjustRequest(fixture.sku(), 1, "phase06 external drop", null),
+                "phase06-external-drop-" + UUID.randomUUID());
+        dispatchOutboxUntilIdle(fixture.variantId());
+        Long jobId = latestJobId(listingId);
+        processJobsUntil(jobId, "DRIFT");
+
+        assertEquals(0, STORE.putCount.get(), "the stale target must never reach WooCommerce");
+        assertEquals(6, STORE.stock, "the externally reduced stock must be preserved");
+
+        Map<String, Object> job = jobRow(jobId);
+        assertEquals("DRIFT", job.get("status"));
+        assertEquals(8, intValue(job, "target_quantity"));
+        assertEquals(6, intValue(job, "verified_quantity"));
+        assertTrue(((String) job.get("last_error")).contains("reconciliation"));
+
+        Map<String, Object> evidence = evidenceForListing(listingId).stream()
+                .filter(row -> "INVENTORY_SYNC".equals(row.get("kind")))
+                .findFirst().orElseThrow();
+        assertEquals("DRIFT", evidence.get("status"));
+        assertEquals("UNEXPECTED_REMOTE_STOCK", evidence.get("error_code"));
+        assertEquals(8, intValue(evidence, "target_quantity"));
+        assertEquals(6, intValue(evidence, "verified_quantity"));
+
+        Map<String, Object> listing = listingRow(listingId);
+        assertEquals("OUT_OF_SYNC", listing.get("sync_status"));
+        assertEquals(8, intValue(listing, "allocated_quota"));
+        assertEquals(6, intValue(listing, "reported_stock"));
+        assertNull(listing.get("verified_quantity"),
+                "a drift observation must not become the verified baseline");
+
+        BusinessRuleException retry = assertThrows(BusinessRuleException.class,
+                () -> syncJobManagementService.retry(jobId));
+        assertEquals(ErrorCode.SYNC_RETRY_NOT_ALLOWED, retry.getErrorCode());
+
+        ChannelSyncEvidenceResponse observed = reconciliationService.reconcileListing(channelId, listingId);
+        assertEquals("DRIFT", observed.status());
+        assertEquals(8, observed.targetQuantity());
+        assertEquals(6, observed.verifiedQuantity());
+        assertEquals(0, STORE.putCount.get(), "reconciliation must not write the old quota back");
+        assertEquals("OUT_OF_SYNC", listingRow(listingId).get("sync_status"));
+    }
+
+    @Test
+    void allocationWriteIsBlockedWhenRemoteStockMovedAfterVerification() {
+        Long channelId = verifiedChannel();
+        Fixture fixture = fixture(20);
+        STORE.stock = 8;
+        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
+        STORE.stock = 6;
+
+        AllocationPlanResponse plan = allocationService.preview(new AllocationPreviewRequest(
+                fixture.sku(),
+                List.of(new AllocationPreviewRequest.AllocationTargetRequest(listingId, 10))));
+        allocationService.confirm(plan.id(), "phase06-allocation-drift-" + UUID.randomUUID());
+        assertTrue(allocationExecutionService.processPlan(plan.id()));
+
+        assertEquals("BLOCKED", allocationService.get(plan.id()).status());
+        assertEquals(0, STORE.putCount.get(), "the allocation write must be blocked before the PUT");
+        assertEquals(6, STORE.stock);
+        assertEquals(0, quota(listingId));
+
+        Map<String, Object> item = jdbcTemplate.queryForMap("""
+                SELECT status, proposed_quota, verified_quantity
+                FROM allocation_plan_items WHERE plan_id = ?
+                """, plan.id());
+        assertEquals("BLOCKED", item.get("status"));
+        assertEquals(10, intValue(item, "proposed_quota"));
+        assertNull(item.get("verified_quantity"));
+
+        Map<String, Object> evidence = evidenceForListing(listingId).stream()
+                .filter(row -> "ALLOCATION_INCREASE".equals(row.get("kind")))
+                .findFirst().orElseThrow();
+        assertEquals("DRIFT", evidence.get("status"));
+        assertEquals("UNEXPECTED_REMOTE_STOCK", evidence.get("error_code"));
+        assertEquals(10, intValue(evidence, "target_quantity"));
+        assertEquals(6, intValue(evidence, "verified_quantity"));
+
+        // Remote 6 is not the proposed 10, so reconciliation must leave the plan blocked.
+        ChannelSyncEvidenceResponse observed = reconciliationService.reconcileListing(channelId, listingId);
+        assertEquals("DRIFT", observed.status());
+        assertEquals(0, observed.targetQuantity());
+        assertEquals(6, observed.verifiedQuantity());
+        assertEquals("BLOCKED", allocationService.get(plan.id()).status());
+        assertEquals(0, quota(listingId));
+        assertEquals(0, STORE.putCount.get());
+        assertEquals(6, STORE.stock);
+    }
+
+    @Test
+    void allocationTimeoutRecoveryRefusesAQuantityThatDoesNotMatchTheTarget() throws Exception {
+        Long channelId = verifiedChannel();
+        Fixture fixture = fixture(20);
+        STORE.stock = 19;
+        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
+        STORE.putDelayMs = 2_000;
+        STORE.clampStockTo = 6;
+
+        AllocationPlanResponse plan = allocationService.preview(new AllocationPreviewRequest(
+                fixture.sku(),
+                List.of(new AllocationPreviewRequest.AllocationTargetRequest(listingId, 8))));
+        allocationService.confirm(plan.id(), "phase06-recovery-refused-" + UUID.randomUUID());
+        assertTrue(allocationExecutionService.processPlan(plan.id()));
+        assertTrue(STORE.awaitCompletedPuts(1, 5_000));
+
+        assertEquals("BLOCKED", allocationService.get(plan.id()).status());
+        assertEquals(6, STORE.stock);
+
+        ChannelSyncEvidenceResponse observed = reconciliationService.reconcileListing(channelId, listingId);
+        assertEquals("DRIFT", observed.status());
+        assertEquals(0, observed.targetQuantity());
+        assertEquals(6, observed.verifiedQuantity());
+        assertEquals("BLOCKED", allocationService.get(plan.id()).status(),
+                "a remote quantity different from the proposed target must stay blocked");
+        assertEquals(0, quota(listingId));
+        assertEquals(1, STORE.putCount.get(), "reconciliation must never resend the timed-out PUT");
+
+        assertFalse(allocationExecutionService.processPlan(plan.id()));
+        syncJobDispatchService.processDueJobs();
+        assertEquals(1, STORE.putCount.get());
+        assertEquals(6, STORE.stock);
+
+        // Once the store really holds the intended target, a new reconciliation may adopt it
+        // without another write.
+        STORE.stock = 8;
+        ChannelSyncEvidenceResponse recovered = reconciliationService.reconcileListing(channelId, listingId);
+        assertEquals("VERIFIED", recovered.status());
+        assertEquals(8, recovered.targetQuantity());
+        assertEquals(8, recovered.verifiedQuantity());
+        assertEquals("COMPLETED", allocationService.get(plan.id()).status());
+        assertEquals(8, quota(listingId));
+        assertEquals(1, STORE.putCount.get());
+    }
+
+    @Test
     void aTimeoutIsUnconfirmedAndOnlyReconciliationCanResolveIt() throws Exception {
         Long channelId = verifiedChannel();
         Fixture fixture = fixture(10);
+        STORE.stock = 4;
         Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
         setQuota(listingId, 8);
-        STORE.stock = 4;
         STORE.putDelayMs = 2_000;
 
         inventoryService.adjustInventory(
@@ -493,8 +638,8 @@ class Phase06WooCommerceIntegrationTest {
     void allocationExecutionPublishesTheVerifiedQuotaThroughTheRealConnector() {
         Long channelId = verifiedChannel();
         Fixture fixture = fixture(20);
-        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
         STORE.stock = 19;
+        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
 
         AllocationPlanResponse plan = allocationService.preview(new AllocationPreviewRequest(
                 fixture.sku(),
@@ -534,8 +679,8 @@ class Phase06WooCommerceIntegrationTest {
     void aBlockedAllocationCannotQueueAZeroQuotaRemoteWrite() throws Exception {
         Long channelId = verifiedChannel();
         Fixture fixture = fixture(20);
-        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
         STORE.stock = 19;
+        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
         // The mapping was valid when verified; disabling stock management now makes the increase
         // fail without writing, leaving the listing target unconfirmed.
         STORE.manageStock = false;
@@ -640,8 +785,8 @@ class Phase06WooCommerceIntegrationTest {
     void allocationWriteTimeoutBlocksImmediatelyAndIsNeverRetried() {
         Long channelId = verifiedChannel();
         Fixture fixture = fixture(20);
-        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
         STORE.stock = 19;
+        Long listingId = verifiedListing(channelId, fixture, "101", null, "WOO-SKU-A");
         STORE.putDelayMs = 2_000;
 
         AllocationPlanResponse plan = allocationService.preview(new AllocationPreviewRequest(
@@ -672,6 +817,20 @@ class Phase06WooCommerceIntegrationTest {
         assertTrue(STORE.awaitCompletedPuts(1, 5_000));
         assertEquals(8, STORE.stock, "the delayed write may have landed; only read-back can decide");
         assertEquals(0, quota(listingId), "an uncertain write must not change the published quota");
+
+        // The store already holds the intended target, so reconciliation can adopt the write
+        // without repeating it. The plan must not stay stuck in BLOCKED.
+        ChannelSyncEvidenceResponse recovered = reconciliationService.reconcileListing(channelId, listingId);
+        assertEquals("VERIFIED", recovered.status());
+        assertEquals(8, recovered.targetQuantity());
+        assertEquals(8, recovered.verifiedQuantity());
+        assertEquals("COMPLETED", allocationService.get(plan.id()).status());
+        assertEquals(8, quota(listingId));
+        assertEquals("VERIFIED", jdbcTemplate.queryForObject("""
+                SELECT status FROM allocation_plan_items WHERE plan_id = ?
+                """, String.class, plan.id()));
+        assertEquals("SYNCED", listingRow(listingId).get("sync_status"));
+        assertEquals(1, STORE.putCount.get(), "recovery must never send another PUT");
     }
 
     @Test

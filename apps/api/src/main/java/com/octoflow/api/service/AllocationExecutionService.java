@@ -84,6 +84,20 @@ public class AllocationExecutionService {
         boolean writeAttempted = false;
         try {
             ChannelInventoryAdapter.RemoteStock before = adapter.readStock(action.channel(), action.listing());
+            if (adapter.requiresVerifiedStockBaseline()) {
+                Integer baseline = action.baselineQuantity();
+                if (baseline == null) {
+                    processor.applyFailure(action, ChannelAdapterException.Kind.UNAVAILABLE,
+                            "NO_STOCK_BASELINE",
+                            "No verified remote stock baseline exists for this listing; reconcile before allocating.",
+                            false);
+                    return true;
+                }
+                if (before.quantity() != baseline) {
+                    processor.applyPreWriteDrift(action, before.quantity(), baseline);
+                    return true;
+                }
+            }
             writeAttempted = true;
             ChannelInventoryAdapter.DeliveryReceipt receipt = adapter.writeStock(
                     action.channel(), action.listing(), action.targetQuantity(), action.idempotencyReference());

@@ -34,17 +34,20 @@ public class ReconciliationRecorder {
     private final ChannelListingRepository listingRepository;
     private final SyncJobRepository jobRepository;
     private final AllocationPlanItemRepository allocationPlanItemRepository;
+    private final AllocationExecutionProcessor allocationExecutionProcessor;
     private final ChannelEvidenceRecorder evidenceRecorder;
     private final SyncEventBroadcaster broadcaster;
 
     public ReconciliationRecorder(ChannelListingRepository listingRepository,
                                   SyncJobRepository jobRepository,
                                   AllocationPlanItemRepository allocationPlanItemRepository,
+                                  AllocationExecutionProcessor allocationExecutionProcessor,
                                   ChannelEvidenceRecorder evidenceRecorder,
                                   SyncEventBroadcaster broadcaster) {
         this.listingRepository = listingRepository;
         this.jobRepository = jobRepository;
         this.allocationPlanItemRepository = allocationPlanItemRepository;
+        this.allocationExecutionProcessor = allocationExecutionProcessor;
         this.evidenceRecorder = evidenceRecorder;
         this.broadcaster = broadcaster;
     }
@@ -58,8 +61,13 @@ public class ReconciliationRecorder {
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.MAPPING_NOT_FOUND,
                         "Không tìm thấy liên kết #" + listingId));
 
-        int target = listing.getAllocatedQuota();
         int remoteBefore = listing.getReportedStock();
+        // Adopt an uncertain allocation step only when the store already holds its intended
+        // quantity. This runs before the observation target is read, so a recovered step makes
+        // the reconciliation result reflect the newly verified quota instead of the old one.
+        allocationExecutionProcessor.recoverBlockedItemsFromReconciliation(
+                listing, remoteQuantity, adapterName, reference);
+        int target = listing.getAllocatedQuota();
         boolean matches = remoteQuantity == target;
 
         ChannelSyncEvidence evidence = evidenceRecorder.record(listing.getId(),
