@@ -34,6 +34,9 @@ public class ChannelDeliveryEligibility {
         if (!listing.isActive()) {
             issues.add("Listing đang bị tắt.");
         }
+        if (listing.isOrderReconciliationRequired()) {
+            issues.add("Đơn WooCommerce cần được đối soát trước khi ghi tồn kho.");
+        }
         if (listing.getMappingStatus() != ChannelListing.MappingStatus.VERIFIED
                 || listing.getMappingVerifiedAt() == null) {
             issues.add("Mapping chưa được xác minh.");

@@ -30,6 +30,15 @@ public interface AllocationPlanRepository extends JpaRepository<AllocationPlan, 
 
     boolean existsByVariantIdAndStatus(Long variantId, AllocationPlan.Status status);
 
+    @Query(value = """
+            SELECT EXISTS (SELECT 1 FROM allocation_plans p
+                LEFT JOIN variant_allocation_states s ON s.variant_id = p.variant_id
+                WHERE p.variant_id = :variantId
+                  AND (p.status = 'APPLYING'
+                       OR (p.status = 'BLOCKED' AND p.allocation_revision = s.current_revision)))
+            """, nativeQuery = true)
+    boolean hasUnresolvedCurrentAllocation(@Param("variantId") Long variantId);
+
     /**
      * Blocked plans that still own a blocked item for this listing at the listing's current
      * allocation revision. Older plans are deliberately excluded: a newer confirmed target must

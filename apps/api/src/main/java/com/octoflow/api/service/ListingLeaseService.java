@@ -10,6 +10,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Optional;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
@@ -64,6 +66,28 @@ public class ListingLeaseService {
             return true;
         });
         return acquired ? Optional.ofNullable(result.get()) : Optional.empty();
+    }
+
+    public <T> Optional<T> tryCallWithLocks(List<Long> listingIds, Supplier<T> work) {
+        List<Long> keys = listingIds.stream().distinct().sorted()
+                .map(id -> (ADVISORY_NAMESPACE << 32) | (id & 0xFFFFFFFFL)).toList();
+        try (Connection connection = dataSource.getConnection()) {
+            boolean originalAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(true);
+            List<Long> acquired = new ArrayList<>();
+            try {
+                for (Long key : keys) {
+                    if (!tryLock(connection, key)) return Optional.empty();
+                    acquired.add(key);
+                }
+                return Optional.ofNullable(work.get());
+            } finally {
+                for (int i = acquired.size() - 1; i >= 0; i--) unlock(connection, acquired.get(i));
+                connection.setAutoCommit(originalAutoCommit);
+            }
+        } catch (SQLException ex) {
+            throw new IllegalStateException("Unable to acquire listing advisory locks", ex);
+        }
     }
 
     private boolean tryLock(Connection connection, long key) throws SQLException {

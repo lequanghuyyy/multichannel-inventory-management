@@ -78,15 +78,35 @@ public class WooCommerceApiClient {
                              String sku, boolean manageStock, Integer stockQuantity, long version) {
     }
 
-    public record RemoteOrderLine(String productId, String variationId, String sku, int quantity) {
+    public record RemoteOrderLine(String id, String productId, String variationId, String sku, int quantity,
+                                  Integer reducedStock, String total) {
     }
 
-    public record RemoteOrder(String id, String status, String currency, String modifiedAtGmt,
+    public record RemoteOrder(String id, String status, String currency, String modifiedAtGmt, String total, Boolean hasRefunds,
                               List<RemoteOrderLine> lines) {
     }
 
     /** Reads one bounded page. The caller decides whether and when to request the next page. */
     public List<RemoteOrder> fetchOrders(Instant modifiedAfter, Instant modifiedBefore, int page, int perPage) {
+        JsonNode response = fetchOrderPage(modifiedAfter, modifiedBefore, page, perPage);
+        List<RemoteOrder> orders = new ArrayList<>();
+        for (JsonNode order : response) {
+            orders.add(parseOrder(order));
+        }
+        return List.copyOf(orders);
+    }
+
+    /** A null identity marks an unidentifiable row without discarding the rest of the page. */
+    public List<String> fetchOrderIds(Instant modifiedAfter, Instant modifiedBefore, int page, int perPage) {
+        List<String> ids = new ArrayList<>();
+        for (JsonNode order : fetchOrderPage(modifiedAfter, modifiedBefore, page, perPage)) {
+            String id = text(order, "id");
+            ids.add(id != null && id.matches("[1-9][0-9]{0,19}") ? id : null);
+        }
+        return java.util.Collections.unmodifiableList(ids);
+    }
+
+    private JsonNode fetchOrderPage(Instant modifiedAfter, Instant modifiedBefore, int page, int perPage) {
         if (modifiedAfter == null || modifiedBefore == null || !modifiedAfter.isBefore(modifiedBefore)
                 || Duration.between(modifiedAfter, modifiedBefore).compareTo(Duration.ofDays(31)) > 0
                 || page < 1 || page > 10_000 || perPage < 1 || perPage > 100) {
@@ -99,11 +119,7 @@ public class WooCommerceApiClient {
         if (response == null || !response.isArray() || response.size() > perPage) {
             throw invalidResponse("WooCommerce orders response was not a valid page.");
         }
-        List<RemoteOrder> orders = new ArrayList<>();
-        for (JsonNode order : response) {
-            orders.add(parseOrder(order));
-        }
-        return List.copyOf(orders);
+        return response;
     }
 
     public RemoteOrder fetchOrder(String orderId) {
@@ -137,10 +153,27 @@ public class WooCommerceApiClient {
                     || quantity.intValue() <= 0) {
                 throw invalidResponse("WooCommerce order contains an invalid line item.");
             }
-            lines.add(new RemoteOrderLine(productId.asText(), variationId.asText(), text(item, "sku"),
-                    quantity.intValue()));
+            lines.add(new RemoteOrderLine(text(item, "id"), productId.asText(), variationId.asText(), text(item, "sku"),
+                    quantity.intValue(), reducedStock(item), text(item, "total")));
         }
-        return new RemoteOrder(id, status, currency, text(node, "date_modified_gmt"), List.copyOf(lines));
+        JsonNode refunds = node.path("refunds");
+        Boolean hasRefunds = refunds.isArray() ? !refunds.isEmpty() : null;
+        return new RemoteOrder(id, status, currency, text(node, "date_modified_gmt"), text(node, "total"), hasRefunds, List.copyOf(lines));
+    }
+
+    private Integer reducedStock(JsonNode item) {
+        JsonNode metadata = item.path("meta_data");
+        if (!metadata.isArray()) return null;
+        Integer result = null;
+        for (JsonNode entry : metadata) {
+            if (!"_reduced_stock".equals(text(entry, "key"))) continue;
+            if (result != null) return null;
+            JsonNode value = entry.path("value");
+            String number = value.isIntegralNumber() || value.isTextual() ? value.asText() : "";
+            if (!number.matches("[0-9]{1,9}")) return null;
+            result = Integer.parseInt(number);
+        }
+        return result;
     }
 
     /**
