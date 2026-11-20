@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.time.Instant;
+import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -60,6 +61,42 @@ class WooCommerceConnectorTest {
         assertEquals("6.7.1", snapshot.wpVersion());
         assertEquals("VND", snapshot.currency());
         assertEquals("oauth1_dev_http", snapshot.authMode());
+    }
+
+    @Test
+    void readsBoundedOrderPagesAndOrderDetailsWithoutLosingVariationIdentity() {
+        String order = """
+                {"id":42,"status":"on-hold","currency":"VND","date_modified_gmt":"2026-01-02T00:00:00",
+                 "line_items":[{"product_id":101,"variation_id":202,"sku":"WOO-SKU-VAR","quantity":2}]}
+                """;
+        store.ordersResponse = "[" + order + "]";
+        store.orderResponse = order;
+        Instant after = Instant.parse("2026-01-01T00:00:00Z");
+        Instant before = after.plus(Duration.ofDays(1));
+
+        var page = client.fetchOrders(after, before, 2, 50);
+        assertEquals(1, page.size());
+        assertEquals("42", page.getFirst().id());
+        assertEquals("on-hold", page.getFirst().status());
+        assertEquals("202", page.getFirst().lines().getFirst().variationId());
+        assertEquals(2, page.getFirst().lines().getFirst().quantity());
+        assertTrue(store.lastOrdersQuery.contains("page=2"));
+        assertTrue(store.lastOrdersQuery.contains("dates_are_gmt=true"));
+        assertEquals(page.getFirst(), client.fetchOrder("42"));
+        assertThrows(IllegalArgumentException.class,
+                () -> client.fetchOrders(after, after.plus(Duration.ofDays(32)), 1, 50));
+    }
+
+    @Test
+    void rejectsMalformedOrderLinesInsteadOfSilentlyChangingQuantities() {
+        store.ordersResponse = """
+                [{"id":42,"status":"processing","currency":"VND",
+                  "line_items":[{"product_id":101,"variation_id":0,"sku":"A","quantity":1.5}]}]
+                """;
+        Instant after = Instant.parse("2026-01-01T00:00:00Z");
+        ChannelAdapterException failure = assertThrows(ChannelAdapterException.class,
+                () -> client.fetchOrders(after, after.plus(Duration.ofDays(1)), 1, 20));
+        assertEquals(WooCommerceReason.INVALID_RESPONSE, failure.getReasonCode());
     }
 
     @Test
