@@ -14,6 +14,7 @@ export type LazadaStatus = {
   write_enabled: boolean; product_write_enabled: boolean; inventory_write_enabled: boolean; order_write_enabled: boolean;
   connection: LazadaConnection | null;
 };
+export type LazadaVerifyResult = { status: string; warning_code?: string };
 export type LazadaSKU = { SkuId?: number | string; SellerSku?: string; Status?: string; price?: number | string; quantity?: number; Available?: number; sellableQuantity?: number };
 export type LazadaProduct = { item_id: number | string; status?: string; attributes?: { name?: string }; skus?: LazadaSKU[] };
 export type LazadaCatalog = { data: { products?: LazadaProduct[]; total_products?: number }; offset: number; limit: number; source: 'lazada_live' };
@@ -105,7 +106,7 @@ export async function startLazadaOAuth(): Promise<string> {
   if (url.protocol !== 'https:' || url.hostname !== 'auth.lazada.com' || url.pathname !== '/oauth/authorize') throw new Error('Địa chỉ ủy quyền Lazada không hợp lệ.');
   return url.toString();
 }
-export const verifyLazada = (channelId: string) => request<{ status: string }>(`/api/v1/channels/${encodeURIComponent(channelId)}/lazada/verify`, 'POST');
+export const verifyLazada = (channelId: string) => request<LazadaVerifyResult>(`/api/v1/channels/${encodeURIComponent(channelId)}/lazada/verify`, 'POST');
 export const disconnectLazada = (channelId: string) => request<{ status: string }>(`/api/v1/channels/${encodeURIComponent(channelId)}/lazada/disconnect`, 'POST');
 export const getLazadaCatalog = (channelId: string, offset = 0, signal?: AbortSignal) => request<LazadaCatalog>(`/api/v1/channels/${encodeURIComponent(channelId)}/lazada/products?offset=${offset}&limit=50`, 'GET', signal);
 export const getLazadaCategories = (channelId: string, signal?: AbortSignal) => request<{ data: LazadaCategory[]; source: 'lazada_live' }>(`/api/v1/channels/${encodeURIComponent(channelId)}/lazada/categories`, 'GET', signal);

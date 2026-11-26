@@ -78,6 +78,104 @@ public class WooCommerceApiClient {
                              String sku, boolean manageStock, Integer stockQuantity, long version) {
     }
 
+    public record RemoteOrderLine(String id, String productId, String variationId, String sku, int quantity,
+                                  Integer reducedStock, String total) {
+    }
+
+    public record RemoteOrder(String id, String status, String currency, String modifiedAtGmt, String total, Boolean hasRefunds,
+                              List<RemoteOrderLine> lines) {
+    }
+
+    /** Reads one bounded page. The caller decides whether and when to request the next page. */
+    public List<RemoteOrder> fetchOrders(Instant modifiedAfter, Instant modifiedBefore, int page, int perPage) {
+        JsonNode response = fetchOrderPage(modifiedAfter, modifiedBefore, page, perPage);
+        List<RemoteOrder> orders = new ArrayList<>();
+        for (JsonNode order : response) {
+            orders.add(parseOrder(order));
+        }
+        return List.copyOf(orders);
+    }
+
+    /** A null identity marks an unidentifiable row without discarding the rest of the page. */
+    public List<String> fetchOrderIds(Instant modifiedAfter, Instant modifiedBefore, int page, int perPage) {
+        List<String> ids = new ArrayList<>();
+        for (JsonNode order : fetchOrderPage(modifiedAfter, modifiedBefore, page, perPage)) {
+            String id = text(order, "id");
+            ids.add(id != null && id.matches("[1-9][0-9]{0,19}") ? id : null);
+        }
+        return java.util.Collections.unmodifiableList(ids);
+    }
+
+    private JsonNode fetchOrderPage(Instant modifiedAfter, Instant modifiedBefore, int page, int perPage) {
+        if (modifiedAfter == null || modifiedBefore == null || !modifiedAfter.isBefore(modifiedBefore)
+                || Duration.between(modifiedAfter, modifiedBefore).compareTo(Duration.ofDays(31)) > 0
+                || page < 1 || page > 10_000 || perPage < 1 || perPage > 100) {
+            throw new IllegalArgumentException("Invalid WooCommerce order page or modified date range (maximum 31 days).");
+        }
+        String path = API_PATH + "/orders?modified_after=" + encode(modifiedAfter.toString())
+                + "&modified_before=" + encode(modifiedBefore.toString())
+                + "&dates_are_gmt=true&orderby=modified&order=asc&page=" + page + "&per_page=" + perPage;
+        JsonNode response = getJson(path, true);
+        if (response == null || !response.isArray() || response.size() > perPage) {
+            throw invalidResponse("WooCommerce orders response was not a valid page.");
+        }
+        return response;
+    }
+
+    public RemoteOrder fetchOrder(String orderId) {
+        String id = requireNumeric(orderId, WooCommerceReason.HTTP_ERROR);
+        RemoteOrder order = parseOrder(getJson(API_PATH + "/orders/" + id, true));
+        if (!id.equals(order.id())) {
+            throw invalidResponse("WooCommerce returned a different order id than requested.");
+        }
+        return order;
+    }
+
+    private RemoteOrder parseOrder(JsonNode node) {
+        requireObject(node, "order");
+        String id = text(node, "id");
+        String status = text(node, "status");
+        String currency = text(node, "currency");
+        JsonNode items = node.path("line_items");
+        if (id == null || !id.matches("[1-9][0-9]{0,19}") || status == null || currency == null
+                || !items.isArray() || items.size() > 200) {
+            throw invalidResponse("WooCommerce order is missing its identity, status, currency or valid line items.");
+        }
+        List<RemoteOrderLine> lines = new ArrayList<>();
+        for (JsonNode item : items) {
+            JsonNode productId = item.path("product_id");
+            JsonNode variationId = item.path("variation_id");
+            JsonNode quantity = item.path("quantity");
+            if (!item.isObject() || !productId.isIntegralNumber() || !productId.canConvertToLong()
+                    || productId.longValue() < 0 || !variationId.isIntegralNumber()
+                    || !variationId.canConvertToLong() || variationId.longValue() < 0
+                    || !quantity.isIntegralNumber() || !quantity.canConvertToInt()
+                    || quantity.intValue() <= 0) {
+                throw invalidResponse("WooCommerce order contains an invalid line item.");
+            }
+            lines.add(new RemoteOrderLine(text(item, "id"), productId.asText(), variationId.asText(), text(item, "sku"),
+                    quantity.intValue(), reducedStock(item), text(item, "total")));
+        }
+        JsonNode refunds = node.path("refunds");
+        Boolean hasRefunds = refunds.isArray() ? !refunds.isEmpty() : null;
+        return new RemoteOrder(id, status, currency, text(node, "date_modified_gmt"), text(node, "total"), hasRefunds, List.copyOf(lines));
+    }
+
+    private Integer reducedStock(JsonNode item) {
+        JsonNode metadata = item.path("meta_data");
+        if (!metadata.isArray()) return null;
+        Integer result = null;
+        for (JsonNode entry : metadata) {
+            if (!"_reduced_stock".equals(text(entry, "key"))) continue;
+            if (result != null) return null;
+            JsonNode value = entry.path("value");
+            String number = value.isIntegralNumber() || value.isTextual() ? value.asText() : "";
+            if (!number.matches("[0-9]{1,9}")) return null;
+            result = Integer.parseInt(number);
+        }
+        return result;
+    }
+
     /**
      * Verifies the store is reachable, the credentials can list products, and (best effort)
      * reads the platform versions/currency. A successful check proves read access only; it says

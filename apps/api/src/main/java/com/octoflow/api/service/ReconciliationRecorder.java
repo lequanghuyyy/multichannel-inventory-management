@@ -62,6 +62,17 @@ public class ReconciliationRecorder {
                         "Không tìm thấy liên kết #" + listingId));
 
         int remoteBefore = listing.getReportedStock();
+        if (listing.isOrderReconciliationRequired()) {
+            String message = "Đơn WooCommerce cần đối soát; số tồn trùng quota chưa chứng minh nguyên nhân.";
+            ChannelSyncEvidence evidence = evidenceRecorder.record(listing.getId(), null, null, null,
+                    "RECONCILE", adapterName, "DRIFT", listing.getAllocatedQuota(), null, null,
+                    remoteQuantity, remoteBefore, remoteQuantity, "ORDER_RECONCILIATION_REQUIRED", message, reference);
+            listing.setReportedStock(remoteQuantity);
+            listing.setSyncStatus(ChannelListing.SyncStatus.OUT_OF_SYNC);
+            listing.setLastSyncError(message);
+            listingRepository.save(listing);
+            return toResponse(evidence);
+        }
         // Adopt an uncertain allocation step only when the store already holds its intended
         // quantity. This runs before the observation target is read, so a recovered step makes
         // the reconciliation result reflect the newly verified quota instead of the old one.

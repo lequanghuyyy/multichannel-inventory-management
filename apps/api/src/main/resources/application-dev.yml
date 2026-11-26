@@ -16,6 +16,17 @@ app:
   security:
     cors-origins: "http://localhost:5174,http://127.0.0.1:5174,capacitor://localhost,https://localhost"
     cookie-secure: ${COOKIE_SECURE:false}
+  channels:
+    lazada:
+      enabled: false
+      app-key: ""
+      app-secret: ""
+      redirect-uri: ""
+      frontend-base-url: ""
+      token-encryption-key: ""
+      product-write-enabled: false
+      inventory-write-enabled: false
+      order-write-enabled: false
   dev-seed:
     admin-password: ${DEV_ADMIN_PASSWORD:DevOnly-Admin@123}
     staff-password: ${DEV_STAFF_PASSWORD:DevOnly-Staff@123}

@@ -132,6 +132,25 @@ app:
       read-timeout-ms: ${WOOCOMMERCE_READ_TIMEOUT_MS:10000}
       allowed-environments: ${WOOCOMMERCE_ALLOWED_ENVIRONMENTS:sandbox,development,test}
       development-host-allowlist: ${WOOCOMMERCE_DEVELOPMENT_HOST_ALLOWLIST:localhost,127.0.0.1,::1}
+    lazada:
+      enabled: ${LAZADA_ENABLED:false}
+      country: ${LAZADA_COUNTRY:VN}
+      environment: ${LAZADA_ENVIRONMENT:sandbox}
+      app-key: ${LAZADA_APP_KEY:}
+      app-secret: ${LAZADA_APP_SECRET:}
+      redirect-uri: ${LAZADA_REDIRECT_URI:}
+      auth-base-url: ${LAZADA_AUTH_BASE_URL:https://auth.lazada.com}
+      api-base-url: ${LAZADA_API_BASE_URL:https://api.lazada.vn/rest}
+      frontend-base-url: ${LAZADA_FRONTEND_BASE_URL:}
+      frontend-channels-path: ${LAZADA_FRONTEND_CHANNELS_PATH:/channels}
+      connect-timeout-ms: ${LAZADA_CONNECT_TIMEOUT_MS:3000}
+      read-timeout-ms: ${LAZADA_READ_TIMEOUT_MS:10000}
+      token-encryption-key: ${LAZADA_TOKEN_ENCRYPTION_KEY:}
+      token-key-id: ${LAZADA_TOKEN_KEY_ID:v1}
+      allowed-environments: ${LAZADA_ALLOWED_ENVIRONMENTS:sandbox}
+      product-write-enabled: ${LAZADA_PRODUCT_WRITE_ENABLED:false}
+      inventory-write-enabled: ${LAZADA_INVENTORY_WRITE_ENABLED:false}
+      order-write-enabled: ${LAZADA_ORDER_WRITE_ENABLED:false}
     ebay:
       enabled: ${EBAY_ENABLED:false}
       environment: ${EBAY_ENVIRONMENT:sandbox}

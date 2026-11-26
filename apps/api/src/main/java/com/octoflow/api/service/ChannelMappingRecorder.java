@@ -49,6 +49,10 @@ public class ChannelMappingRecorder {
                 .orElseThrow(() -> new ResourceNotFoundException(ErrorCode.MAPPING_NOT_FOUND,
                         "Không tìm thấy liên kết #" + listingId + " thuộc kênh #" + channelId));
         Channel channel = listing.getChannel();
+        if (listing.isOrderReconciliationRequired()) {
+            throw new ApiException(HttpStatus.CONFLICT, ErrorCode.CONCURRENT_MODIFICATION,
+                    "Đơn WooCommerce cần được đối soát trước khi xác minh lại mapping.");
+        }
         if (channel == null || channel.getStatus() != Channel.Status.CONNECTED) {
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.CHANNEL_DELIVERY_UNAVAILABLE,
                     "Kênh chưa CONNECTED nên không thể xác minh mapping.");

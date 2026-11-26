@@ -41,6 +41,9 @@ export function ChannelsPage({ mode }: { mode: DemoMode }) {
   const [lazadaConnecting, setLazadaConnecting] = useState(false);
   const [oauthResult] = useState(() => new URLSearchParams(window.location.search).get('ebay_oauth'));
   const [lazadaOAuthResult] = useState(() => new URLSearchParams(window.location.search).get('lazada_oauth'));
+  const [lazadaOAuthChannelId] = useState(() => new URLSearchParams(window.location.search).get('channel_id'));
+  const [lazadaOAuthReason] = useState(() => new URLSearchParams(window.location.search).get('reason'));
+  const lazadaOAuthConnected = lazadaOAuthResult === 'success' || lazadaOAuthResult === 'connected';
   const deferredQuery = useDeferredValue(filters.query);
 
   useEffect(() => {
@@ -80,7 +83,7 @@ export function ChannelsPage({ mode }: { mode: DemoMode }) {
   useEffect(() => {
     if (!lazadaOAuthResult) return;
     const params = new URLSearchParams(window.location.search);
-    params.delete('lazada_oauth'); params.delete('channel_id');
+    params.delete('lazada_oauth'); params.delete('channel_id'); params.delete('reason');
     window.history.replaceState(window.history.state, '', `${window.location.pathname}${params.size ? `?${params}` : ''}${window.location.hash}`);
     void page.refresh();
   }, [lazadaOAuthResult]);
@@ -139,7 +142,7 @@ export function ChannelsPage({ mode }: { mode: DemoMode }) {
 
   return <section className="mx-auto flex w-full max-w-[1240px] flex-col gap-6 py-8">
     <ChannelsHeader onRefresh={page.refresh} refreshing={page.loading || page.loadingMore} canManage={auth?.user?.role === 'ADMIN'} ebayEnabled={ebayEnabled} ebayConnections={ebayConnections} ebayConnecting={ebayConnecting} onConnectEbay={() => void connectEbay()} lazadaStatus={mode === 'default' ? lazadaStatus : null} lazadaConnecting={lazadaConnecting} onConnectLazada={() => void connectLazada()} onOpenLazada={() => lazadaStatus?.connection?.channel_id && navigate(href({ name: 'channel-detail', id: lazadaStatus.connection.channel_id }))} />
-    {lazadaOAuthResult ? <Card role="status" className="border border-outline-variant/50 p-3 text-sm text-on-surface">{lazadaOAuthResult === 'connected' ? 'Lazada VN đã ủy quyền. Hãy mở kênh để xác minh quyền đọc sản phẩm.' : `Kết nối Lazada chưa hoàn tất (${lazadaOAuthResult}). Kiểm tra seller whitelist, callback và quyền ứng dụng.`}</Card> : null}
+     {lazadaOAuthResult ? <Card role="status" className="flex flex-wrap items-center justify-between gap-3 border border-outline-variant/50 p-3 text-sm text-on-surface"><span>{lazadaOAuthConnected ? 'Lazada VN đã ủy quyền. Hãy mở kênh để xác minh quyền đọc sản phẩm.' : `Kết nối Lazada chưa hoàn tất (${lazadaOAuthReason || lazadaOAuthResult}). Kiểm tra seller whitelist, callback và quyền ứng dụng.`}</span>{lazadaOAuthConnected && lazadaOAuthChannelId ? <Button variant="ghost" size="sm" onClick={() => navigate(href({ name: 'channel-detail', id: lazadaOAuthChannelId }))}>Mở kênh Lazada</Button> : null}</Card> : null}
     {lazadaError ? <p role="alert" className="rounded-control border border-error/40 bg-error/5 p-3 text-sm text-error">{lazadaError}</p> : null}
     {oauthResult ? <Card role="status" className={`border p-3 text-sm leading-5 ${oauthResult === 'connected' ? 'border-success/40 bg-success/5 text-on-surface' : 'border-apricot/60 bg-apricot/5 text-on-surface'}`}>{oauthResult === 'connected' ? 'eBay Sandbox đã hoàn tất ủy quyền. Danh sách kênh đang được tải lại.' : oauthResult === 'denied' ? 'Bạn đã từ chối quyền eBay. Có thể bắt đầu kết nối lại bất cứ lúc nào.' : `Kết nối eBay chưa hoàn tất (${oauthResult}). Kiểm tra RuName, quyền ứng dụng và cấu hình Sandbox rồi thử lại.`}</Card> : null}
     {ebayStatusError && mode === 'default' ? <p role="status" className="text-caption text-graphite">Chưa đọc được trạng thái kết nối eBay: {ebayStatusError}</p> : null}

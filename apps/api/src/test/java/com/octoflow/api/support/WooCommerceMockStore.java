@@ -42,6 +42,10 @@ public final class WooCommerceMockStore implements AutoCloseable {
     public volatile boolean omitStockQuantityOnPut;
     /** When true, a PUT is applied but the response body is not valid JSON. */
     public volatile boolean malformedPutResponse;
+    public volatile String ordersResponse = "[]";
+    public volatile String orderResponse = "{}";
+    public volatile String lastOrdersQuery;
+    public final java.util.Map<String, String> ordersById = new java.util.concurrent.ConcurrentHashMap<>();
 
     private final HttpServer server;
     private final ExecutorService executor;
@@ -78,6 +82,10 @@ public final class WooCommerceMockStore implements AutoCloseable {
         rejectProducts = false;
         omitStockQuantityOnPut = false;
         malformedPutResponse = false;
+        ordersResponse = "[]";
+        orderResponse = "{}";
+        lastOrdersQuery = null;
+        ordersById.clear();
     }
 
     /**
@@ -96,6 +104,18 @@ public final class WooCommerceMockStore implements AutoCloseable {
         String path = exchange.getRequestURI().getPath();
         String query = exchange.getRequestURI().getRawQuery();
         try {
+            if ("GET".equals(method) && ("/wp-json/wc/v3/orders".equals(path)
+                    || path.matches("/wp-json/wc/v3/orders/[0-9]+"))) {
+                if (!authenticated(query)) {
+                    respond(exchange, 401, error("woocommerce_rest_cannot_view", "Cannot list orders."));
+                    return;
+                }
+                lastOrdersQuery = query;
+                String id = path.substring(path.lastIndexOf('/') + 1);
+                respondRaw(exchange, 200, "orders".equals(id) ? ordersResponse
+                        : ordersById.getOrDefault(id, orderResponse));
+                return;
+            }
             if ("/wp-json/".equals(path)) {
                 respond(exchange, 200, site());
                 return;

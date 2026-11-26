@@ -71,6 +71,17 @@ public class ChannelListing extends BaseEntity {
     @Column(name = "target_allocation_revision", nullable = false)
     private long targetAllocationRevision = 0L;
 
+    @Column(name = "order_reconciliation_required", nullable = false)
+    private boolean orderReconciliationRequired;
+
+    public boolean isOrderReconciliationRequired() {
+        return orderReconciliationRequired;
+    }
+
+    public void setOrderReconciliationRequired(boolean value) {
+        this.orderReconciliationRequired = value;
+    }
+
     public enum SyncStatus {
         UNVERIFIED, SYNCED, OUT_OF_SYNC, ERROR
     }

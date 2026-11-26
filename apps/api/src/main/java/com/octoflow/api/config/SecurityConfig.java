@@ -69,6 +69,8 @@ public class SecurityConfig {
                 // Public / Health / Swagger / System
                 .requestMatchers("/health/**", "/actuator/**", "/api/v1/openapi.json", "/api/v1/system", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                 .requestMatchers("/api/v1/auth/login", "/api/v1/auth/mobile/login").permitAll()
+                // OAuth callback is public by protocol; LazadaConnectionService enforces one-time state.
+                .requestMatchers(HttpMethod.GET, "/api/v1/integrations/lazada/callback").permitAll()
                 // Admin-only operations
                 .requestMatchers(HttpMethod.POST, "/api/v1/products/**").hasRole("ADMIN")
                 .requestMatchers(HttpMethod.PATCH, "/api/v1/products/**").hasRole("ADMIN")
