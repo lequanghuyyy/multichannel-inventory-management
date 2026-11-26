@@ -1,45 +1,125 @@
-# OctoFlow — Multi-channel Inventory Management System
+# OctoFlow
 
-Hệ thống quản lý sản phẩm, tồn kho trung tâm và đồng bộ đa kênh (POS, Shopify, WooCommerce, eBay) dành cho người bán lẻ (AI-driven Seller App).
+**Hệ thống quản lý tồn kho và đơn hàng đa kênh** cho cửa hàng bán lẻ. Dự án tập trung vào việc giữ một nguồn dữ liệu tồn kho nhất quán khi sản phẩm được bán qua POS và các kênh thương mại điện tử.
 
-## 🛠️ Ngăn xếp Công nghệ (Tech Stack)
+## Tổng quan
 
-Chi tiết đặc tả kiến trúc kỹ thuật được mô tả đầy đủ tại [**TECH_STACK.md**](TECH_STACK.md):
-- **Backend Core:** **Java 21 LTS**, **Spring Boot 3.x** (Spring Security, Spring Data JPA, Flyway, HikariCP, SseEmitter, RestClient, Actuator, springdoc-openapi).
-- **Frontend Web & Mobile:** **React 19**, **TypeScript ~5.9**, **Vite 7**, **Tailwind CSS v4**, **Capacitor 8** (Android / iOS).
-- **Cơ sở dữ liệu:** **PostgreSQL 17** với kiểm soát tranh chấp bằng Pessimistic Row-level Locking (`SELECT FOR UPDATE`).
-- **AI / ML Microservices:** **Python 3.11+**, **FastAPI**, **Uvicorn**, Scikit-learn, LightGBM, Statsmodels, PyTorch (Dự báo nhu cầu, giám sát sức khỏe đồng bộ đa kênh).
+OctoFlow cung cấp giao diện quản trị cho danh mục sản phẩm, tồn kho, nhập hàng, đơn hàng và trạng thái đồng bộ. Backend được tổ chức thành một ứng dụng Spring Boot, dùng PostgreSQL làm nguồn dữ liệu chính; web app giao tiếp với API qua REST và nhận cập nhật đồng bộ qua SSE.
 
-## 📖 Tài liệu dự án
+### Giao diện
 
-Hồ sơ bàn giao nghiệp vụ và đặc tả yêu cầu phần mềm chi tiết được lưu trong thư mục [`docs/`](docs/):
+<p>
+  <img src="apps/seller/preview-desktop.png" alt="Giao diện OctoFlow trên desktop" width="720">
+</p>
+<p>
+  <img src="apps/seller/preview-mobile.png" alt="Giao diện OctoFlow trên màn hình mobile" width="280">
+</p>
 
-| Tài liệu | Nội dung |
+### Phạm vi hiện có trong repository
+
+| Phân hệ | Nội dung |
 |---|---|
-| [Hồ sơ bàn giao nghiệp vụ](docs/README.md) | Tổng quan mốc đối chiếu, quy tắc bàn giao và nguồn dữ liệu chuẩn. |
-| [SRS — Software Requirements Specification](docs/SRS.md) | Đặc tả yêu cầu phần mềm, tác nhân, yêu cầu chức năng/phi chức năng. |
-| [01 — Sản phẩm và phạm vi](docs/01-san-pham-va-pham-vi.md) | Bài toán, ranh giới sản phẩm và tiêu chí thành công. |
-| [02 — Vai trò và hành trình](docs/02-vai-tro-va-hanh-trinh.md) | Phân quyền Admin/Staff và các hành trình nghiệp vụ chính. |
-| [03 — Quy tắc nghiệp vụ](docs/03-quy-tac-nghiep-vu.md) | Quy tắc tồn kho ATS, giữ hàng (reservation), phân bổ kênh, đơn hàng và AI. |
-| [04 — Danh mục chức năng](docs/04-danh-muc-chuc-nang.md) | Ma trận năng lực và hiện trạng triển khai theo từng phân hệ. |
-| [05 — Nghiệm thu và việc còn lại](docs/05-nghiem-thu-va-viec-con-lai.md) | Bộ kịch bản kiểm thử nghiệm thu (AC-01..16) và các khoảng trống cần hoàn tất. |
-| [06 — Thuật ngữ và quyết định](docs/06-thuat-ngu-va-quyet-dinh.md) | Từ điển nghiệp vụ và các quyết định chiến lược cần chốt. |
+| Danh mục | Sản phẩm, biến thể và mapping listing theo kênh. |
+| Tồn kho | Số dư, ledger, điều chỉnh, reservation, phiếu nhập và phân bổ tồn. |
+| Đơn hàng / POS | Tạo đơn, xử lý vòng đời đơn và ghi nhận thanh toán. |
+| Đồng bộ | Outbox, sync jobs, retry, reconciliation và cập nhật realtime qua SSE. |
+| WooCommerce | Kiểm tra kết nối, quản lý mapping và nhập đơn từ cửa hàng đã xác minh. |
+| Lazada | Luồng OAuth kết nối và quản lý token được mã hóa; cần thông tin ứng dụng để kết nối thật. |
+| Bảo mật | Session cookie, CSRF, phân quyền `ADMIN`/`STAFF` và idempotency cho thao tác ghi. |
 
-## Chạy Backend Java ở môi trường local
+Các thao tác ghi ra hệ thống bên ngoài bị tắt theo mặc định và được điều khiển bằng cấu hình. Màn hình cho một kênh bán không đồng nghĩa backend đã có connector production cho kênh đó. Repository này không bao gồm dịch vụ AI/ML Python hay bản demo production được host.
 
-Backend không tự chọn tài khoản, mật khẩu cơ sở dữ liệu hoặc cấu hình CORS cho môi trường mặc định. Khi chạy local, bật profile `dev`; profile này cung cấp cấu hình PostgreSQL local và chỉ trong profile này mới tạo tài khoản/dữ liệu mẫu. Có thể ghi đè mật khẩu mẫu bằng `DEV_ADMIN_PASSWORD` và `DEV_STAFF_PASSWORD`.
+## Kiến trúc
+
+```mermaid
+flowchart LR
+    Web[Seller Web - React] -->|REST / SSE| API[Spring Boot API]
+    Android[Android - Capacitor] -->|REST / SSE| API
+    API --> DB[(PostgreSQL)]
+    API --> WC[WooCommerce]
+    API --> Lazada[Lazada Open Platform]
+```
+
+Một số quyết định kỹ thuật chính:
+
+- Tính tồn có thể bán theo `on_hand - reserved - safety_buffer`.
+- Dùng transaction và khóa dữ liệu ở database để bảo vệ các cập nhật tồn kho cạnh tranh.
+- Dùng `Idempotency-Key` cho các thao tác ghi quan trọng để tránh xử lý lặp khi client retry.
+- Ghi sự kiện đồng bộ vào outbox, sau đó xử lý qua worker; trạng thái được phát tới client bằng SSE.
+- Mật khẩu, endpoint và khóa tích hợp được cấu hình qua biến môi trường; không đưa credential thật vào frontend.
+
+Xem [TECH_STACK.md](TECH_STACK.md) để biết thêm về kiến trúc và các lựa chọn kỹ thuật.
+
+## Công nghệ
+
+- **Backend:** Java 21, Spring Boot 3.4, Spring Security, Spring Data JPA, Flyway.
+- **Database:** PostgreSQL 17.
+- **Web:** React 19, TypeScript, Vite, Tailwind CSS.
+- **Mobile:** Capacitor; repository có Android project.
+- **Kiểm thử:** JUnit, Testcontainers, Vitest, Testing Library và Playwright.
+
+## Chạy local
+
+Yêu cầu: JDK 21, Maven, Docker Compose và Node.js 24.
+
+### 1. Khởi động PostgreSQL
+
+Từ thư mục gốc:
 
 ```bash
-export SPRING_PROFILES_ACTIVE=dev
+docker compose -f compose.db.yaml up -d
+```
+
+Database local được mở tại `localhost:5433`.
+
+### 2. Khởi động API
+
+PowerShell:
+
+```powershell
+$env:SPRING_PROFILES_ACTIVE = "dev"
 mvn -f apps/api/pom.xml spring-boot:run
 ```
 
-Mặc định local dùng database `octoflow` trên `localhost:5433` với user `octoflow`. Production phải cung cấp `DB_URL`, `DB_USER`, `DB_PASSWORD`, `COOKIE_SECURE=true` và `CORS_ALLOWED_ORIGINS` phù hợp; không bật profile `dev`.
+Linux/macOS:
 
-Tạo sản phẩm, điều chỉnh tồn, giữ/bán hàng, đơn hàng và phiếu nhập cần `Idempotency-Key`. Tạo sản phẩm luôn bắt đầu ở trạng thái nháp với tồn bằng 0; nhập tồn sau đó qua phiếu nhập hoặc điều chỉnh có lý do. Kết quả idempotency được giữ 24 giờ mặc định; thời hạn có thể cấu hình bằng `IDEMPOTENCY_TTL`.
+```bash
+SPRING_PROFILES_ACTIVE=dev mvn -f apps/api/pom.xml spring-boot:run
+```
 
-Đánh giá nền tảng Java và các quyết định của Phase 01: [docs/audits/phase-01-java-foundation-review.md](docs/audits/phase-01-java-foundation-review.md).
+API chạy tại `http://localhost:8085`; tài liệu Swagger tại `http://localhost:8085/swagger-ui.html`.
 
-Rà soát an toàn dữ liệu Phase 01.1 — order identity, contract POS-only, thứ tự khóa tồn kho, reservation/receiving: [docs/audits/phase-01.1-java-data-safety-review.md](docs/audits/phase-01.1-java-data-safety-review.md).
+### 3. Khởi động web app
 
-Rà soát Phase 02 — vòng đời sản phẩm/SKU, tồn trung tâm và nhập hàng nhiều đợt: [docs/audits/phase-02-inventory-receiving-review.md](docs/audits/phase-02-inventory-receiving-review.md). Mỗi lần nhận hàng là một batch độc lập; chỉ số lượng được chấp nhận mới tăng tồn, batch chỉ có hàng lỗi vẫn được lưu audit nhưng không tạo ledger/outbox.
+Mở terminal khác:
+
+```bash
+cd apps/seller
+npm ci
+npm run dev
+```
+
+Mở `http://127.0.0.1:5174`. Vite proxy các request `/api` và `/health` tới API local.
+
+Profile `dev` chỉ dành cho máy local và tạo dữ liệu mẫu. Không dùng profile hoặc mật khẩu mặc định của môi trường dev khi triển khai production. Kết nối với WooCommerce/Lazada cần credential riêng; không commit các credential đó.
+
+## Kiểm thử
+
+Backend — một số integration test dùng Testcontainers và cần Docker đang chạy:
+
+```bash
+mvn -f apps/api/pom.xml test
+```
+
+Frontend:
+
+```bash
+cd apps/seller
+npm test
+npm run build
+npm run check:secrets
+```
+
+## Android
+
+Android app là web app được đóng gói bằng Capacitor. Xem [hướng dẫn build Android](apps/seller/android/README.md) và [chi tiết cài Android SDK](apps/seller/android/BUILD_GUIDE.md).

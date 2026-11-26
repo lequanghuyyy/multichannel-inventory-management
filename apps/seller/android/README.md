@@ -1,96 +1,46 @@
-# DATT Seller - Android App
+# OctoFlow Seller — Android
 
-## Build nhanh (Quick Start)
+Ứng dụng Android là bản React Seller được đóng gói trong Capacitor WebView; nghiệp vụ và giao diện được chia sẻ với web app. Package ID hiện tại là `com.datt.seller`.
 
-### Yêu cầu
-- ✅ Java JDK (đã có - version 21)
-- ⚠️ Android SDK Command-line Tools (cần cài đặt)
-- ✅ Node.js >= 24 (đã có)
+## Yêu cầu
 
-### Setup lần đầu
+- Node.js `>=24 <25`
+- JDK 21
+- Android SDK với Android Platform 36 và Platform Tools
 
-```powershell
-# Từ thư mục gốc dự án
-.\scripts\setup-android-sdk.ps1
-```
+## Build bản debug
 
-Script này sẽ:
-- Hướng dẫn tải và cài Android SDK
-- Cài đặt các components cần thiết
-- Kiểm tra cấu hình
-
-### Build APK
+Từ thư mục gốc repository, chạy trong PowerShell:
 
 ```powershell
-# Build Debug APK (dùng để test)
-.\scripts\build-android.ps1
-
-# Build và cài luôn lên điện thoại
-.\scripts\build-android.ps1 -Install
-
-# Build Release APK (production)
-.\scripts\build-android.ps1 -Release
-
-# Clean build (nếu gặp lỗi)
-.\scripts\build-android.ps1 -Clean
+cd apps/seller
+npm ci
+npm run build
+npx cap sync android
+cd android
+.\gradlew.bat assembleDebug
 ```
 
-### Test trên điện thoại thật
+Trên macOS/Linux, dùng `./gradlew assembleDebug` thay cho `gradlew.bat`.
 
-1. **Bật USB Debugging:**
-   - Settings → About phone → Tap "Build number" 7 lần
-   - Settings → Developer options → Enable "USB debugging"
+APK được tạo tại:
 
-2. **Kết nối và kiểm tra:**
-   ```powershell
-   adb devices
-   ```
+```text
+apps/seller/android/app/build/outputs/apk/debug/app-debug.apk
+```
 
-3. **Cài đặt APK:**
-   ```powershell
-   .\scripts\build-android.ps1 -Install
-   ```
+Để cài lên thiết bị đã kết nối qua ADB:
 
-4. **Xem logs realtime:**
-   ```powershell
-   adb logcat | Select-String "DATT"
-   ```
-
-## Hướng dẫn chi tiết
-
-Xem: [BUILD_GUIDE.md](./BUILD_GUIDE.md)
-
-## Thông tin app
-
-- **Package Name**: `com.datt.seller`
-- **App Name**: DATT Seller
-- **Min SDK**: 24 (Android 7.0+)
-- **Target SDK**: 36 (Android 15)
-
-## Build outputs
-
-- Debug APK: `app/build/outputs/apk/debug/app-debug.apk`
-- Release APK: `app/build/outputs/apk/release/app-release.apk`
-- AAB Bundle: `app/build/outputs/bundle/release/app-release.aab`
-
-## Troubleshooting
-
-### "ANDROID_HOME not set"
 ```powershell
-$env:ANDROID_HOME = "C:\Android"
-$env:ANDROID_SDK_ROOT = "C:\Android"
+.\gradlew.bat installDebug
 ```
 
-### "sdkmanager not found"
-- Thêm vào PATH: `%ANDROID_HOME%\cmdline-tools\latest\bin`
-- Restart terminal
+## API endpoint trên thiết bị
 
-### "device unauthorized"
-- Chấp nhận USB debugging prompt trên điện thoại
-- Chạy lại `adb devices`
+Bản mobile cần API có HTTPS origin mà thiết bị truy cập được. Trước `npm run build`, đặt `VITE_API_URL` trong môi trường build hoặc file `apps/seller/.env`. Không dùng `localhost`/loopback cho thiết bị thật và không đặt password, token hay API key trong biến `VITE_*`. Xem [`.env.example`](../.env.example).
 
-### Build failed
-```powershell
-# Clean và build lại
-.\scripts\build-android.ps1 -Clean
-```
+## Release
+
+Repository chưa cấu hình release signing. Không phát hành APK/AAB release cho người dùng trước khi thiết lập signing an toàn; không commit keystore, `key.properties` hoặc mật khẩu signing.
+
+Xem [BUILD_GUIDE.md](BUILD_GUIDE.md) để cài Android SDK và xử lý lỗi build.

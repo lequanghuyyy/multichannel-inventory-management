@@ -1,268 +1,71 @@
-# Hướng dẫn Build APK bằng Command-line Tools
+# Android build guide
 
-## Yêu cầu hệ thống
+Hướng dẫn này dành cho Android wrapper của OctoFlow Seller (Capacitor). Các bước tạo APK chạy từ source trong repository; không cần các script PowerShell riêng ở thư mục gốc.
 
-1. **Java JDK**: Đã cài đặt (Java 11 hoặc Java 17 được khuyến nghị)
-   - Kiểm tra: `java -version`
-   
-2. **Android SDK Command-line Tools** (Bắt buộc)
-   - Download từ: https://developer.android.com/studio#command-tools
-   - Giải nén vào thư mục, ví dụ: `C:\Android\cmdline-tools`
+## 1. Cài công cụ
 
-3. **Node.js**: Đã cài đặt (>=24 <25)
-   - Kiểm tra: `node --version`
+Cần có:
 
-## Bước 1: Cài đặt Android SDK Command-line Tools
+- JDK 21 (`java -version`)
+- Node.js `>=24 <25` và npm (`node --version`)
+- Android SDK; cài Android Platform 36 và Platform Tools bằng Android Studio SDK Manager hoặc `sdkmanager`
 
-### Tải về
-1. Truy cập: https://developer.android.com/studio#command-tools
-2. Download "Command line tools only" for Windows
-3. File tải về: `commandlinetools-win-XXXXXXXX_latest.zip` (khoảng 150MB)
-
-### Giải nén và sắp xếp thư mục
-
-**Bước 1: Tạo thư mục gốc**
-```powershell
-mkdir C:\Android
-```
-
-**Bước 2: Giải nén file ZIP**
-- Giải nén file `commandlinetools-win-*.zip`
-- Sau khi giải nén, bạn sẽ có thư mục `cmdline-tools` chứa các file
-
-**Bước 3: Sắp xếp cấu trúc đúng**
-
-⚠️ **QUAN TRỌNG**: Android SDK yêu cầu cấu trúc thư mục chính xác!
-
-File sau khi giải nén sẽ có cấu trúc:
-```
-cmdline-tools/
-  ├── bin/
-  ├── lib/
-  ├── source.properties
-  └── NOTICE.txt
-```
-
-Bạn cần tạo thư mục `latest` và di chuyển nội dung vào:
-
-**Option A: Di chuyển thủ công**
-1. Tạo: `C:\Android\cmdline-tools\latest\`
-2. Di chuyển TẤT CẢ nội dung từ `cmdline-tools\` vào `cmdline-tools\latest\`
-
-**Option B: Dùng PowerShell**
-```powershell
-# Tạo cấu trúc
-mkdir C:\Android\cmdline-tools\latest
-
-# Di chuyển nội dung (giả sử file giải nén tại Downloads)
-Move-Item $env:USERPROFILE\Downloads\cmdline-tools\* C:\Android\cmdline-tools\latest\
-```
-
-### Cấu trúc thư mục cuối cùng (đúng)
-```
-C:\Android\
-  └── cmdline-tools\
-      └── latest\                    ← Phải có thư mục "latest"
-          ├── bin\
-          │   ├── sdkmanager.bat    ← File quan trọng
-          │   ├── avdmanager.bat
-          │   └── ...
-          ├── lib\
-          │   └── *.jar
-          ├── source.properties
-          └── NOTICE.txt
-```
-
-### Kiểm tra cấu trúc
-```powershell
-# Kiểm tra file sdkmanager có đúng vị trí
-Test-Path C:\Android\cmdline-tools\latest\bin\sdkmanager.bat
-# Phải trả về: True
-```
-
-### Thiết lập biến môi trường
-Thêm các biến sau vào **System Environment Variables**:
+Ví dụ cài component cần thiết:
 
 ```powershell
-# Thêm vào System hoặc User Environment Variables
-ANDROID_HOME=C:\Android
-ANDROID_SDK_ROOT=C:\Android
-
-# Thêm vào PATH
-%ANDROID_HOME%\cmdline-tools\latest\bin
-%ANDROID_HOME%\platform-tools
-%ANDROID_HOME%\emulator
+sdkmanager "platform-tools" "platforms;android-36"
 ```
 
-**Hoặc dùng PowerShell (tạm thời cho session hiện tại):**
+Android Gradle Plugin của dự án là 8.13.0 và Gradle Wrapper tải Gradle 8.14.3.
+
+## 2. Cấu hình Android SDK
+
+Đặt `ANDROID_HOME` và `ANDROID_SDK_ROOT` trỏ tới thư mục SDK. Ví dụ PowerShell:
+
 ```powershell
 $env:ANDROID_HOME = "C:\Android"
-$env:ANDROID_SDK_ROOT = "C:\Android"
-$env:PATH += ";$env:ANDROID_HOME\cmdline-tools\latest\bin;$env:ANDROID_HOME\platform-tools"
+$env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
 ```
 
-## Bước 2: Cài đặt Android SDK Components
+Có thể cấu hình đường dẫn SDK trong `apps/seller/android/local.properties` dựa trên [`local.properties.example`](local.properties.example). File `local.properties` là cấu hình máy cá nhân, không commit.
 
-Sau khi thiết lập biến môi trường, cài đặt các thành phần cần thiết:
+## 3. Build APK debug
 
-```powershell
-# Chấp nhận license
-sdkmanager --licenses
-
-# Cài đặt build tools và platform
-sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.1"
-
-# (Tùy chọn) Nếu cần emulator
-sdkmanager "emulator" "system-images;android-36;google_apis;x86_64"
-```
-
-## Bước 3: Build APK
-
-### Option A: Sử dụng script tự động (Khuyến nghị)
+Từ thư mục gốc repository:
 
 ```powershell
-# Từ thư mục gốc dự án
-.\scripts\build-android.ps1
-```
-
-### Option B: Build thủ công từng bước
-
-```powershell
-# 1. Di chuyển đến thư mục seller app
-cd apps\seller
-
-# 2. Build web app
+cd apps/seller
+npm ci
 npm run build
-
-# 3. Sync với Capacitor
 npx cap sync android
-
-# 4. Di chuyển đến thư mục android
 cd android
-
-# 5. Build Debug APK
-.\gradlew assembleDebug
-
-# Hoặc Build Release APK (cần keystore)
-.\gradlew assembleRelease
+.\gradlew.bat assembleDebug
 ```
 
-## Bước 4: Tìm APK đã build
+Trên macOS/Linux, dùng `./gradlew assembleDebug`. APK đầu ra:
 
-### Debug APK
-```
-apps\seller\android\app\build\outputs\apk\debug\app-debug.apk
-```
-
-### Release APK  
-```
-apps\seller\android\app\build\outputs\apk\release\app-release.apk
+```text
+apps/seller/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Bước 5: Cài đặt APK lên điện thoại
-
-### Yêu cầu
-1. Bật **Developer Options** trên điện thoại
-2. Bật **USB Debugging**
-3. Kết nối điện thoại qua USB
-
-### Cài đặt qua ADB
+Cài trực tiếp lên thiết bị Android có bật USB debugging:
 
 ```powershell
-# Kiểm tra điện thoại đã kết nối
-adb devices
-
-# Cài đặt APK
-adb install apps\seller\android\app\build\outputs\apk\debug\app-debug.apk
-
-# Hoặc cài đặt lại (ghi đè)
-adb install -r apps\seller\android\app\build\outputs\apk\debug\app-debug.apk
-
-# Gỡ cài đặt nếu cần
-adb uninstall com.datt.seller
+.\gradlew.bat installDebug
 ```
 
-### Cài đặt trực tiếp
-Nếu không có ADB, copy file APK vào điện thoại và cài đặt thủ công.
+## 4. Cấu hình API cho thiết bị
 
-## Troubleshooting
-
-### Lỗi: "sdkmanager: command not found"
-- Kiểm tra biến môi trường ANDROID_HOME và PATH
-- Restart PowerShell/Terminal sau khi thêm biến môi trường
-- Đảm bảo cấu trúc thư mục đúng: `cmdline-tools\latest\bin`
-
-### Lỗi: "Android SDK not found"
-- Thiết lập ANDROID_HOME và ANDROID_SDK_ROOT
-- Chạy: `sdkmanager --list` để kiểm tra
-
-### Lỗi: "Failed to install the following Android SDK packages"
-- Chạy: `sdkmanager --licenses` và chấp nhận tất cả licenses
-
-### Lỗi Gradle: "Could not determine java version"
-- Đảm bảo Java 11 hoặc 17 được cài đặt
-- Thiết lập JAVA_HOME nếu cần
-
-### Lỗi: "adb: device unauthorized"
-- Chấp nhận USB debugging prompt trên điện thoại
-- Chạy lại: `adb devices`
-
-## Thông tin bổ sung
-
-### Thông số build hiện tại
-- **Application ID**: `com.datt.seller`
-- **Min SDK**: 24 (Android 7.0)
-- **Target SDK**: 36 (Android 15)
-- **Compile SDK**: 36
-- **Version Code**: 1
-- **Version Name**: 1.0
-
-### Gradle Commands hữu ích
+Web local dùng proxy của Vite; bản native cần URL API riêng có HTTPS và truy cập được từ điện thoại. Đặt `VITE_API_URL` trước khi build, ví dụ:
 
 ```powershell
-# Xem tất cả tasks
-.\gradlew tasks
-
-# Clean build
-.\gradlew clean
-
-# Build cả debug và release
-.\gradlew build
-
-# Build bundle (AAB) cho Google Play
-.\gradlew bundleRelease
-
-# Xem dependencies
-.\gradlew dependencies
+$env:VITE_API_URL = "https://api.example.com"
 ```
 
-### Chạy trực tiếp từ command-line
-```powershell
-# Build và run trên thiết bị đã kết nối
-cd apps\seller\android
-.\gradlew installDebug
+Giá trị `VITE_*` được đóng gói vào frontend và không phải nơi lưu secret. Không dùng địa chỉ loopback cho thiết bị thật.
 
-# Xem logs realtime
-adb logcat | Select-String "DATT"
-```
+## Lưu ý phát hành
 
-## Signing Release APK (Sản xuất)
+Project hiện có cấu hình build debug nhưng chưa khai báo release signing. Trước khi phát hành cần bổ sung cấu hình signing phù hợp và lưu keystore/credentials ngoài Git. Không commit APK/AAB, keystore hoặc `key.properties`.
 
-Để tạo release APK cho production, cần tạo keystore:
-
-```powershell
-# Tạo keystore
-keytool -genkey -v -keystore datt-seller.keystore -alias datt-seller -keyalg RSA -keysize 2048 -validity 10000
-
-# Tạo file key.properties trong android/
-# Nội dung:
-storePassword=<password>
-keyPassword=<password>
-keyAlias=datt-seller
-storeFile=datt-seller.keystore
-```
-
-Sau đó build release:
-```powershell
-.\gradlew assembleRelease
-```
+Nếu Gradle không tìm thấy SDK, kiểm tra `ANDROID_HOME`, `ANDROID_SDK_ROOT` hoặc `local.properties`; sau đó chạy lại `sdkmanager --licenses` để chấp nhận license Android SDK.
