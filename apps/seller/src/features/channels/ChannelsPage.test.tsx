@@ -51,6 +51,15 @@ describe('ChannelsPage', () => {
     render(<ChannelsPage mode="error" />);
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Không thể tải dữ liệu'));
   });
+
+  it('recognizes the Lazada OAuth success result and uses its returned channel id', async () => {
+    window.history.replaceState({}, '', '/channels?lazada_oauth=success&channel_id=42');
+    await renderChannels();
+
+    expect(screen.getByText('Lazada VN đã ủy quyền. Hãy mở kênh để xác minh quyền đọc sản phẩm.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Mở kênh Lazada' }));
+    expect(window.location.pathname).toBe('/channels/42');
+  });
 });
 
 // ---------------------------------------------------------------------------

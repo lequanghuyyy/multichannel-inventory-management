@@ -17,6 +17,10 @@ export function LazadaPanel({ channel, tab, canManage, onUpdated, onSettings }: 
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [mapping, setMapping] = useState<LazadaMappingReport | null>(null);
+  const hasStoredAuthorization = Boolean(status?.connection?.access_token_expires_at || status?.connection?.refresh_token_expires_at);
+  const refreshTokenExpiresAt = Date.parse(status?.connection?.refresh_token_expires_at ?? '');
+  const canVerify = status?.connection?.status === 'connected'
+    || (status?.connection?.status !== 'reauthorization_required' && refreshTokenExpiresAt > Date.now());
   useEffect(() => {
     const controller = new AbortController();
     void getLazadaStatus(controller.signal).then((value) => { if (!controller.signal.aborted) setStatus(value); })
@@ -35,7 +39,12 @@ export function LazadaPanel({ channel, tab, canManage, onUpdated, onSettings }: 
     setBusy(true); setError(''); setMessage('');
     try {
       if (action === 'connect') { window.location.assign(await startLazadaOAuth()); return; }
-      if (action === 'verify') { await verifyLazada(channelId); setMessage('Quyền đọc sản phẩm đã được API Lazada xác minh.'); }
+      if (action === 'verify') {
+        const result = await verifyLazada(channelId);
+        setMessage(result.warning_code
+          ? 'Quyền đọc sản phẩm đã xác minh; quyền đọc đơn hàng chưa được xác nhận.'
+          : 'Quyền đọc sản phẩm và đơn hàng đã được API Lazada xác minh.');
+      }
       else { await disconnectLazada(channelId); setMessage('Đã ngắt kết nối và xóa token đã lưu.'); }
       setStatus(await getLazadaStatus()); onUpdated();
     } catch { setError(action === 'verify' ? 'Chưa xác minh được quyền đọc sản phẩm.' : 'Thao tác kết nối Lazada chưa hoàn tất.'); }
@@ -71,7 +80,7 @@ export function LazadaPanel({ channel, tab, canManage, onUpdated, onSettings }: 
         <Field label="Ghi tồn kho Lazada" value={status?.inventory_write_enabled ? 'Đã bật tại server' : 'Tắt tại server'} />
         <Field label="Bằng chứng ghi tồn" value={status?.connection?.capabilities?.inventory_write ? 'Đã xác minh từ Lazada' : 'Chưa có lần ghi tồn xác minh'} />
       </dl>
-      {canManage ? <div className="flex flex-wrap gap-2 border-t border-outline-variant/50 pt-4"><Button size="sm" disabled={!status?.enabled} loading={busy} onClick={() => void act('connect')}>Kết nối lại</Button><Button variant="secondary" size="sm" disabled={status?.connection?.status !== 'connected'} loading={busy} onClick={() => void act('verify')}>Kiểm tra kết nối</Button><Button variant="ghost" size="sm" disabled={status?.connection?.status !== 'connected'} loading={busy} onClick={() => void act('disconnect')}>Ngắt kết nối</Button></div> : null}
+      {canManage ? <div className="flex flex-wrap gap-2 border-t border-outline-variant/50 pt-4"><Button size="sm" disabled={!status?.enabled} loading={busy} onClick={() => void act('connect')}>Kết nối lại</Button><Button variant="secondary" size="sm" disabled={!canVerify} loading={busy} onClick={() => void act('verify')}>Kiểm tra kết nối</Button><Button variant="ghost" size="sm" disabled={!hasStoredAuthorization} loading={busy} onClick={() => void act('disconnect')}>Ngắt kết nối</Button></div> : null}
     </Card>
     {message ? <p role="status" className="text-sm text-on-surface">{message}</p> : null}
     {error ? <p role="alert" className="text-sm text-error">{error}</p> : null}
